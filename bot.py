@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import html
 import logging
 import os
 import re
@@ -159,6 +160,7 @@ def lesson_sort(item: dict) -> tuple:
 LESSON_TYPES = {"лек": "Лекция", "пр": "Практика", "лаб": "Лабораторная"}
 LESSON_TYPES_PLURAL = {"Лекция": "лекции", "Практика": "практики", "Лабораторная": "лабораторные"}
 WEEKDAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье")
+WEEKDAY_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 # Семь временных слотов, встречающихся в расписании ВКБ51, включая вечернюю пару.
 PAIR_SLOTS = (("08:30", "10:05"), ("10:15", "11:50"), ("12:00", "13:35"),
               ("14:15", "15:50"), ("16:00", "17:35"), ("17:45", "19:20"),
@@ -169,13 +171,14 @@ BUTTON_TOMORROW = "➡️ Завтра"
 BUTTON_PREVIOUS_WEEK = "◀️ Неделя"
 BUTTON_CURRENT_WEEK = "🗓 Эта неделя"
 BUTTON_NEXT_WEEK = "Неделя ▶️"
+BUTTON_TEXT = "📝 Текст"
 
 
 def telegram_keyboard() -> dict:
     return {
         "keyboard": [[{"text": BUTTON_TODAY}, {"text": BUTTON_TOMORROW}],
                      [{"text": BUTTON_PREVIOUS_WEEK}, {"text": BUTTON_NEXT_WEEK}],
-                     [{"text": BUTTON_CURRENT_WEEK}]],
+                     [{"text": BUTTON_CURRENT_WEEK}, {"text": BUTTON_TEXT}]],
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -234,24 +237,26 @@ def same_lesson(a: dict, b: dict) -> bool:
     return all(a.get(field) == b.get(field) for field in FIELDS if field not in ("датаНачала", "датаОкончания"))
 
 
-def lesson_blocks(lessons: list[dict]) -> list[list[dict]]:
+def lesson_blocks(lessons: list[dict], change_kinds: dict[str, str] | None = None) -> list[list[dict]]:
     blocks = []
     for item in lessons:
         previous = blocks[-1][-1] if blocks else None
         adjacent = (previous is not None and slot_index(previous) is not None
                     and slot_index(item) == slot_index(previous) + 1)
-        if adjacent and same_lesson(previous, item) and item["датаНачала"] > previous["датаНачала"]:
+        same_marker = (previous is None or not change_kinds
+                       or change_kinds.get(previous["код"]) == change_kinds.get(item["код"]))
+        if adjacent and same_marker and same_lesson(previous, item) and item["датаНачала"] > previous["датаНачала"]:
             blocks[-1].append(item)
         else:
             blocks.append([item])
     return blocks
 
 
-def timeline_entries(lessons: list[dict]) -> list[tuple[str, object]]:
+def timeline_entries(lessons: list[dict], change_kinds: dict[str, str] | None = None) -> list[tuple[str, object]]:
     """Группы занятий и пустые стандартные слоты между первой и последней парой."""
     entries: list[tuple[str, object]] = []
     previous_slot: int | None = None
-    for block in lesson_blocks(lessons):
+    for block in lesson_blocks(lessons, change_kinds):
         first_slot, last_slot = slot_index(block[0]), slot_index(block[-1])
         if previous_slot is not None and first_slot is not None and first_slot > previous_slot + 1:
             entries.append(("window", (previous_slot + 1, first_slot - 1)))
@@ -294,9 +299,9 @@ def day_message(snapshot: dict[str, dict], date: str, group_name: str) -> str:
     return f"📅 {heading}\nВсего: {pairs_label(slots)}\n\n" + "\n\n".join(details)
 
 
-def card_blocks(lessons: list[dict]) -> list[dict]:
+def card_blocks(lessons: list[dict], change_kinds: dict[str, str] | None = None) -> list[dict]:
     blocks = []
-    for kind, value in timeline_entries(lessons):
+    for kind, value in timeline_entries(lessons, change_kinds):
         if kind == "window":
             start_slot, end_slot = value
             blocks.append({"window": True, "start": PAIR_SLOTS[start_slot][0],
@@ -309,6 +314,7 @@ def card_blocks(lessons: list[dict]) -> list[dict]:
         blocks.append({
             "start": first["датаНачала"][11:16],
             "end": last["датаОкончания"][11:16],
+            "codes": [x["код"] for x in group],
             "starts": [x["датаНачала"][11:16] for x in group],
             "pairs": [slot_index(x) + 1 if slot_index(x) is not None else None for x in group],
             "subject": subject,
@@ -330,7 +336,8 @@ def schedule_card(snapshot: dict[str, dict], date: str, group_name: str) -> byte
     return render_card(group_name, date, card_blocks(lessons), slots)
 
 
-def week_card(snapshot: dict[str, dict], monday: str, group_name: str) -> bytes:
+def week_card(snapshot: dict[str, dict], monday: str, group_name: str,
+              highlights: dict | None = None) -> bytes:
     from card import render_week_card
 
     days = []
@@ -339,8 +346,44 @@ def week_card(snapshot: dict[str, dict], monday: str, group_name: str) -> bytes:
         date = (start + timedelta(days=offset)).isoformat()
         lessons = sorted((x for x in snapshot.values() if lesson_date(x) == date), key=lesson_sort)
         slots = len({(x["датаНачала"], x["датаОкончания"]) for x in lessons})
-        days.append({"date": date, "blocks": card_blocks(lessons), "slots": slots})
+        changed = (highlights or {}).get("changed") or {}
+        blocks = card_blocks(lessons, changed)
+        if highlights:
+            for block in blocks:
+                if not block.get("window"):
+                    marks = [changed[code] for code in block["codes"] if code in changed]
+                    if marks:
+                        block["change"] = "ДОБАВЛЕНО" if all(mark == "ДОБАВЛЕНО" for mark in marks) else "ИЗМЕНЕНО"
+            for old_item in highlights.get("removed") or []:
+                if lesson_date(old_item) != date:
+                    continue
+                subject, _ = subject_and_type(old_item)
+                blocks.append({"removed": True, "change": "УДАЛЕНО",
+                               "start": old_item["датаНачала"][11:16],
+                               "end": old_item["датаОкончания"][11:16],
+                               "pairs": [slot_index(old_item) + 1 if slot_index(old_item) is not None else None],
+                               "subject": subject, "teacher": old_item.get("преподаватель", ""),
+                               "place": old_item.get("аудитория", ""), "type": "Занятие"})
+            blocks.sort(key=lambda block: (block["start"], 0 if block.get("removed") else 1))
+        days.append({"date": date, "blocks": blocks, "slots": slots})
     return render_week_card(group_name, monday, days)
+
+
+def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str) -> dict[str, dict]:
+    weeks: dict[str, dict] = {}
+    for code in set(old) | set(new):
+        before, after = old.get(code), new.get(code)
+        if before == after:
+            continue
+        if after and lesson_date(after) > today:
+            monday = week_start(lesson_date(after))
+            marker = weeks.setdefault(monday, {"changed": {}, "removed": []})
+            marker["changed"][code] = ("ДОБАВЛЕНО" if before is None or lesson_date(before) != lesson_date(after)
+                                       else "ИЗМЕНЕНО")
+        if before and lesson_date(before) > today and (after is None or lesson_date(after) != lesson_date(before)):
+            monday = week_start(lesson_date(before))
+            weeks.setdefault(monday, {"changed": {}, "removed": []})["removed"].append(before)
+    return weeks
 
 
 def week_message(snapshot: dict[str, dict], monday: str, group_name: str) -> str:
@@ -352,11 +395,89 @@ def week_message(snapshot: dict[str, dict], monday: str, group_name: str) -> str
     return "\n\n".join(lines)
 
 
+def text_week_view(snapshot: dict[str, dict], monday: str, group_name: str) -> tuple[str, dict]:
+    start = datetime.fromisoformat(monday).date()
+    end = start + timedelta(days=6)
+    lines = [f"<b>НЕДЕЛЯ {start:%d.%m}–{end:%d.%m.%Y} · {html.escape(group_name)}</b>", ""]
+    buttons = []
+    for offset in range(7):
+        day = start + timedelta(days=offset)
+        lessons = sorted((item for item in snapshot.values() if lesson_date(item) == day.isoformat()),
+                         key=lesson_sort)
+        slots = len({(item["датаНачала"], item["датаОкончания"]) for item in lessons})
+        if lessons:
+            period = f"{lessons[0]['датаНачала'][11:16]}–{max(item['датаОкончания'][11:16] for item in lessons)}"
+            detail = f"{pairs_label(slots)} · {period}"
+        else:
+            detail = "нет пар"
+        lines.append(f"<b>{WEEKDAY_SHORT[offset]} {day:%d.%m}</b> · {html.escape(detail)}")
+        if offset % 4 == 0:
+            buttons.append([])
+        buttons[-1].append({"text": f"{WEEKDAY_SHORT[offset]} {day.day}",
+                            "callback_data": f"td:{day.isoformat()}"})
+    available = sorted({week_start(lesson_date(item)) for item in snapshot.values()})
+    arrows = []
+    if available and (start - timedelta(days=7)).isoformat() >= available[0]:
+        arrows.append({"text": "◀️ Неделя", "callback_data": f"tw:{(start - timedelta(days=7)).isoformat()}"})
+    if available and (start + timedelta(days=7)).isoformat() <= available[-1]:
+        arrows.append({"text": "Неделя ▶️", "callback_data": f"tw:{(start + timedelta(days=7)).isoformat()}"})
+    if arrows:
+        buttons.append(arrows)
+    return "\n".join(lines), {"inline_keyboard": buttons}
+
+
+def text_day_view(snapshot: dict[str, dict], date: str, group_name: str) -> tuple[str, dict]:
+    day = datetime.fromisoformat(date).date()
+    lessons = sorted((item for item in snapshot.values() if lesson_date(item) == date), key=lesson_sort)
+    slots = len({(item["датаНачала"], item["датаОкончания"]) for item in lessons})
+    lines = [f"<b>{WEEKDAYS[day.weekday()].upper()} · {day:%d.%m.%Y} · {html.escape(group_name)}</b>",
+             f"{pairs_label(slots)}" if lessons else "Занятий нет"]
+    symbols = {"Лекция": "🟢", "Практика": "🟠", "Лабораторная": "🟣"}
+    for block in card_blocks(lessons):
+        lines.append("")
+        if block.get("window"):
+            numbers = block["pairs"]
+            label = f"{numbers[0]}-я пара" if len(numbers) == 1 else f"пары {numbers[0]}–{numbers[-1]}"
+            lines.append(f"⏳ <b>ОКНО</b> · {label} · {block['start']}–{block['end']}")
+            continue
+        numbers = [number for number in block["pairs"] if number]
+        label = (f"{numbers[0]} пара" if len(numbers) == 1 else f"{numbers[0]}–{numbers[-1]} пары") if numbers else "Пара"
+        lines.append(f"{symbols.get(block['type'], '🔵')} <b>{label} · {block['start']}–{block['end']}</b>")
+        lines.append(f"<b>{html.escape(block['subject'])}</b> · {html.escape(block['type'].lower())}")
+        if len(block["starts"]) > 1:
+            starts = " · ".join(f"{number}-я {start}" if number else start
+                                for number, start in zip(block["pairs"], block["starts"]))
+            lines.append(f"По парам: {starts}")
+        if block.get("place"):
+            lines.append(f"📍 <b>{html.escape(str(block['place']))}</b>")
+        if block.get("teacher"):
+            lines.append(f"👤 {html.escape(str(block['teacher']))}")
+        if block.get("subgroup"):
+            lines.append(f"Подгруппа {block['subgroup']}")
+    monday = week_start(date)
+    day_buttons = []
+    if day.weekday() > 0:
+        day_buttons.append({"text": "◀️ День", "callback_data": f"td:{(day - timedelta(days=1)).isoformat()}"})
+    day_buttons.append({"text": "🗓 К неделе", "callback_data": f"tw:{monday}"})
+    if day.weekday() < 6:
+        day_buttons.append({"text": "День ▶️", "callback_data": f"td:{(day + timedelta(days=1)).isoformat()}"})
+    buttons = {"inline_keyboard": [day_buttons]}
+    return "\n".join(lines), buttons
+
+
 LABELS = {
     "датаНачала": "начало", "датаОкончания": "конец", "дисциплина": "предмет",
     "преподаватель": "преподаватель", "аудитория": "аудитория",
     "номерПодгруппы": "подгруппа", "замена": "замена", "ссылка": "ссылка", "тема": "тема",
 }
+
+
+def change_value(field: str, value: object) -> str:
+    if field in ("датаНачала", "датаОкончания") and isinstance(value, str) and value:
+        return datetime.fromisoformat(value).strftime("%d.%m %H:%M")
+    if field == "замена":
+        return "да" if value else "нет"
+    return str(value) if value else "—"
 
 
 def changes_message(old: dict[str, dict], new: dict[str, dict], today: str, group_name: str) -> str:
@@ -367,12 +488,14 @@ def changes_message(old: dict[str, dict], new: dict[str, dict], today: str, grou
         if max(lesson_date(x) for x in (before, after) if x) < today:
             continue
         if before is None:
-            lines.append("➕ Добавлено: " + lesson_date(after) + "\n" + lesson_text(after))
+            lines.append("➕ Добавлено: " + datetime.fromisoformat(lesson_date(after)).strftime("%d.%m.%Y") + "\n" + lesson_text(after))
         elif after is None:
-            lines.append("➖ Удалено: " + lesson_date(before) + "\n" + lesson_text(before))
+            lines.append("➖ Удалено: " + datetime.fromisoformat(lesson_date(before)).strftime("%d.%m.%Y") + "\n" + lesson_text(before))
         elif before != after:
-            details = [f"{LABELS[key]}: {before.get(key) or '—'} → {after.get(key) or '—'}" for key in FIELDS if before.get(key) != after.get(key)]
-            lines.append("✏️ Изменено: " + lesson_date(after) + "\n" + lesson_text(after) + "\n    " + "; ".join(details))
+            details = [f"{LABELS[key]}: {change_value(key, before.get(key))} → {change_value(key, after.get(key))}"
+                       for key in FIELDS if before.get(key) != after.get(key)]
+            lines.append("✏️ Изменено: " + datetime.fromisoformat(lesson_date(after)).strftime("%d.%m.%Y")
+                         + "\n" + lesson_text(after) + "\n    " + "; ".join(details))
     if not lines:
         return ""
     if len(lines) > 25:
@@ -402,7 +525,8 @@ def load_state(path: Path) -> dict:
     if not path.exists():
         return {"snapshot": None, "pending": {"telegram": [], "vk": []},
                 "daily_queued": {}, "weekly_queued": {}, "cards": {},
-                "card_tracking_ready": True, "telegram_offset": 0, "telegram_keyboard_version": 0}
+                "card_tracking_ready": True, "telegram_offset": 0,
+                "telegram_keyboard_version": 0, "change_batches": {}}
     state = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(state, dict) or not isinstance(state.get("pending"), dict):
         raise RuntimeError("Повреждён файл состояния; восстановите его из копии")
@@ -412,6 +536,7 @@ def load_state(path: Path) -> dict:
     state.setdefault("cards", {})
     state.setdefault("telegram_offset", 0)
     state.setdefault("telegram_keyboard_version", 0)
+    state.setdefault("change_batches", {})
     state.setdefault("snapshot", None)
     for channel in ("telegram", "vk"):
         state["pending"].setdefault(channel, [])
@@ -481,9 +606,11 @@ class Bot:
             if "error" in response:
                 raise RuntimeError(f"ВКонтакте: {response['error'].get('error_msg')}")
 
-    def send_telegram_chat(self, chat_id: int, message: str) -> None:
+    def send_telegram_chat(self, chat_id: int, message: str, inline_markup: dict | None = None) -> None:
         params = {"chat_id": chat_id, "text": message}
-        if chat_id == self.state.get("telegram_chat_id"):
+        if inline_markup is not None:
+            params["reply_markup"] = json.dumps(inline_markup, ensure_ascii=False)
+        elif chat_id == self.state.get("telegram_chat_id"):
             params["reply_markup"] = json.dumps(telegram_keyboard(), ensure_ascii=False)
         response = request_json(
             f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
@@ -491,8 +618,31 @@ class Bot:
         )
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
-        if chat_id == self.state.get("telegram_chat_id"):
+        if inline_markup is None and chat_id == self.state.get("telegram_chat_id"):
             self.state["telegram_keyboard_version"] = 1
+
+    def send_text_view(self, chat_id: int, view: str, date: str, message_id: int | None = None) -> None:
+        snapshot = self.state.get("snapshot")
+        if snapshot is None:
+            self.send_telegram_chat(chat_id, "Расписание пока не загружено.")
+            return
+        message, markup = (text_week_view(snapshot, date, self.group_name) if view == "week"
+                           else text_day_view(snapshot, date, self.group_name))
+        method = "editMessageText" if message_id else "sendMessage"
+        params = {"chat_id": chat_id, "text": message, "parse_mode": "HTML",
+                  "reply_markup": json.dumps(markup, ensure_ascii=False)}
+        if message_id:
+            params["message_id"] = message_id
+        response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/{method}",
+                                params, method="POST")
+        if not response.get("ok") and "message is not modified" not in str(response.get("description", "")):
+            raise RuntimeError(f"Telegram: {response.get('description')}")
+
+    def answer_callback(self, callback_id: str, text: str = "") -> None:
+        response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/answerCallbackQuery",
+                                {"callback_query_id": callback_id, "text": text}, method="POST", timeout=8)
+        if not response.get("ok"):
+            raise RuntimeError(f"Telegram: {response.get('description')}")
 
     def send_telegram_card(self, chat_id: int, png: bytes, caption: str) -> int | None:
         response = request_json(
@@ -625,6 +775,14 @@ class Bot:
         for part in split_message(message):
             self.state["pending"][channel].append({"text": part, "kind": kind, "date": date})
 
+    def queue_future_change(self, channel: str, message: str, batch_id: str) -> None:
+        parts = split_message(message)
+        for index, part in enumerate(parts):
+            self.state["pending"][channel].append({
+                "text": part, "kind": "future_change",
+                "batch_id": batch_id if channel == "telegram" and index == len(parts) - 1 else "",
+            })
+
     def queue_daily(self, channel: str, date: str) -> None:
         self.state["pending"][channel].append({"kind": "daily", "view": "day", "date": date, "format": "card"})
 
@@ -654,6 +812,10 @@ class Bot:
                     if item.get("format") == "card":
                         self.send_card(channel, item.get("view", "day"), item["date"],
                                        replace=item["kind"] == "refresh")
+                    elif channel == "telegram" and item.get("batch_id"):
+                        markup = {"inline_keyboard": [[{"text": "🗓 Показать изменения",
+                                                       "callback_data": f"changes:{item['batch_id']}"}]]}
+                        self.send_telegram_chat(self.state["telegram_chat_id"], item["text"], markup)
                     else:
                         self.send(channel, item["text"])
                 except Exception as exc:
@@ -685,19 +847,57 @@ class Bot:
         self.state["telegram_week_cursor"] = target
         self.send_week("telegram", target)
 
-    def telegram_commands(self, today: str) -> None:
-        if not self.telegram_token:
+    def show_change_batch(self, chat_id: int, batch_id: str) -> None:
+        batch = self.state["change_batches"].get(batch_id)
+        if not batch:
+            self.send_telegram_chat(chat_id, "Это уведомление уже устарело. Откройте расписание недели кнопками ниже.")
             return
+        snapshot = batch["snapshot"]
+        for monday, marker in sorted(batch["weeks"].items()):
+            caption = f"Изменения {self.group_name} · неделя с {datetime.fromisoformat(monday):%d.%m.%Y}"
+            try:
+                self.send_telegram_card(chat_id, week_card(snapshot, monday, self.group_name, marker), caption)
+            except Exception as exc:
+                LOG.warning("Не удалось отправить карточку изменений за %s: %s", monday, exc)
+                for part in split_message(week_message(snapshot, monday, self.group_name)):
+                    self.send_telegram_chat(chat_id, part)
+
+    def telegram_commands(self, today: str) -> bool:
+        if not self.telegram_token:
+            return False
         try:
             response = request_json(
                 f"https://api.telegram.org/bot{self.telegram_token}/getUpdates",
-                {"offset": self.state["telegram_offset"], "timeout": 0, "allowed_updates": '["message"]'},
-                timeout=10,
+                {"offset": self.state["telegram_offset"], "timeout": 2,
+                 "allowed_updates": '["message","callback_query"]'},
+                timeout=6,
             )
             if not response.get("ok"):
                 raise RuntimeError(response.get("description"))
             for update in response.get("result", []):
                 self.state["telegram_offset"] = update["update_id"] + 1
+                callback = update.get("callback_query")
+                if callback:
+                    callback_message = callback.get("message") or {}
+                    callback_chat = callback_message.get("chat") or {}
+                    chat_id = callback_chat.get("id")
+                    if callback_chat.get("type") != "private" or chat_id != self.state.get("telegram_chat_id"):
+                        self.answer_callback(callback["id"], "Недоступно")
+                        continue
+                    action = str(callback.get("data") or "")
+                    if action.startswith("changes:"):
+                        self.answer_callback(callback["id"])
+                        self.show_change_batch(chat_id, action.split(":", 1)[1])
+                    elif action.startswith(("tw:", "td:")):
+                        self.answer_callback(callback["id"])
+                        view, date = action.split(":", 1)
+                        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                            self.send_text_view(chat_id, "week" if view == "tw" else "day", date,
+                                                callback_message.get("message_id"))
+                    else:
+                        self.answer_callback(callback["id"], "Кнопка устарела")
+                    save_state(self.state_file, self.state)
+                    continue
                 message = update.get("message") or {}
                 chat = message.get("chat") or {}
                 chat_id = chat.get("id")
@@ -735,21 +935,23 @@ class Bot:
                         self.navigate_week(today, -1)
                     elif command == BUTTON_NEXT_WEEK:
                         self.navigate_week(today, 1)
+                    elif verb in ("/text", "/week_text") or command == BUTTON_TEXT:
+                        self.send_text_view(chat_id, "week", week_start(today))
                     elif verb in ("/today_text", "/tomorrow_text"):
                         date = today if verb == "/today_text" else (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
-                        message = (day_message(self.state["snapshot"], date, self.group_name)
-                                   if self.state.get("snapshot") is not None else "Расписание пока не загружено.")
-                        for part in split_message(message):
-                            self.send("telegram", part)
+                        self.send_text_view(chat_id, "day", date)
                     elif verb in ("/start", "/help"):
-                        self.send("telegram", "Выберите день или листайте недели кнопками ниже. Команды /today, /tomorrow, /week и /nextweek тоже работают; /today_text и /tomorrow_text дают текст.")
+                        self.send("telegram", "Выберите день или листайте недели кнопками ниже. 📝 Текст откроет обзор недели с выбором дня.")
                 save_state(self.state_file, self.state)
+            return True
         except Exception as exc:
             LOG.error("Ошибка обработки команд Telegram: %s", exc)
+            return False
 
     def cycle(self) -> None:
         now = datetime.now(MOSCOW)
         today = now.date().isoformat()
+        self.telegram_commands(today)
         try:
             if self.state.get("group_checked_on") != today:
                 try:
@@ -766,10 +968,27 @@ class Bot:
             if old and not snapshot and any(lesson_date(x) >= today for x in old.values()):
                 raise RuntimeError("API неожиданно вернул пустое расписание; старые данные сохранены")
             if old is not None:
-                message = changes_message(old, snapshot, today, self.group_name)
-                if message:
+                current_old = {code: item for code, item in old.items() if lesson_date(item) == today}
+                current_new = {code: item for code, item in snapshot.items() if lesson_date(item) == today}
+                future_old = {code: item for code, item in old.items() if lesson_date(item) > today}
+                future_new = {code: item for code, item in snapshot.items() if lesson_date(item) > today}
+                current_message = changes_message(current_old, current_new, today, self.group_name)
+                future_message = changes_message(future_old, future_new, today, self.group_name)
+                if current_message or future_message:
+                    weeks = future_change_weeks(old, snapshot, today) if future_message else {}
+                    batch_id = secrets.token_hex(4) if weeks and "telegram" in self.channels() else ""
+                    if batch_id:
+                        batch_snapshot = {code: item for code, item in snapshot.items()
+                                          if week_start(lesson_date(item)) in weeks}
+                        batches = self.state["change_batches"]
+                        batches[batch_id] = {"snapshot": batch_snapshot, "weeks": weeks, "created": today}
+                        while len(batches) > 20:
+                            batches.pop(next(iter(batches)))
                     for channel in self.channels():
-                        self.queue(channel, message)
+                        if current_message:
+                            self.queue(channel, "Сегодня: " + current_message)
+                        if future_message:
+                            self.queue_future_change(channel, "Будущие дни: " + future_message, batch_id)
                         changed = set()
                         for code in set(old) | set(snapshot):
                             if old.get(code) != snapshot.get(code):
@@ -802,7 +1021,6 @@ class Bot:
             save_state(self.state_file, self.state)
         except Exception as exc:
             LOG.error("Не удалось обновить расписание: %s", exc)
-        self.telegram_commands(today)
         self.ensure_telegram_keyboard()
         self.drain(today)
 
@@ -902,14 +1120,14 @@ def main() -> int:
     while not STOP:
         bot.cycle()
         deadline = time.monotonic() + bot.interval
-        next_command_check = time.monotonic() + 10
         while not STOP and time.monotonic() < deadline:
-            if time.monotonic() >= next_command_check:
+            poll_ok = True
+            if bot.telegram_token:
                 today = datetime.now(MOSCOW).date().isoformat()
-                bot.telegram_commands(today)
+                poll_ok = bot.telegram_commands(today)
                 bot.drain(today)
-                next_command_check = time.monotonic() + 10
-            time.sleep(min(1, deadline - time.monotonic()))
+            pause = (0.2 if poll_ok else 2) if bot.telegram_token else 1
+            time.sleep(min(pause, max(0, deadline - time.monotonic())))
     LOG.info("Бот остановлен")
     return 0
 

@@ -10,9 +10,10 @@ from unittest.mock import patch
 import requests
 from PIL import Image
 
-from bot import (BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, Bot,
-                 changes_message, day_message, normalize_lesson, proxy_for_url,
-                 request_json, schedule_card, split_message, week_card)
+from bot import (BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, BUTTON_TEXT, Bot,
+                 changes_message, day_message, future_change_weeks, normalize_lesson,
+                 proxy_for_url, request_json, schedule_card, split_message, text_day_view,
+                 text_week_view, week_card)
 
 
 def lesson(code=1, room="101", start="2026-09-24T09:00:00"):
@@ -34,6 +35,13 @@ class ScheduleTests(unittest.TestCase):
         message = changes_message(old, new, "2026-09-24", "ВКБ51")
         self.assertIn("аудитория: 101 → 102", message)
         self.assertEqual(message.count("Изменено:"), 1)
+
+    def test_change_notice_shows_readable_date_and_time(self):
+        old = {"1": lesson(start="2026-09-25T08:30:00")}
+        new = {"1": lesson(start="2026-09-25T10:15:00")}
+        message = changes_message(old, new, "2026-09-24", "ВКБ51")
+        self.assertIn("25.09.2026", message)
+        self.assertIn("начало: 25.09 08:30 → 25.09 10:15", message)
 
     def test_past_changes_are_ignored(self):
         old = {"1": lesson(room="101", start="2026-09-23T09:00:00")}
@@ -85,6 +93,41 @@ class ScheduleTests(unittest.TestCase):
         with Image.open(BytesIO(png)) as image:
             self.assertEqual(image.width, 960)
             self.assertGreater(image.height, 1200)
+
+    def test_future_changes_are_grouped_into_affected_weeks(self):
+        old = {"1": lesson(start="2026-09-25T09:00:00"),
+               "2": lesson(code=2, start="2026-10-01T09:00:00")}
+        new = {"1": lesson(room="102", start="2026-09-25T09:00:00")}
+        weeks = future_change_weeks(old, new, "2026-09-24")
+        self.assertEqual(set(weeks), {"2026-09-21", "2026-09-28"})
+        self.assertEqual(weeks["2026-09-21"]["changed"], {"1": "ИЗМЕНЕНО"})
+        self.assertEqual(weeks["2026-09-28"]["removed"][0]["код"], "2")
+
+    def test_highlight_marks_only_the_changed_pair_in_a_chain(self):
+        first = lesson(start="2026-09-25T08:30:00")
+        first["датаОкончания"] = "2026-09-25T10:05:00"
+        second = lesson(code=2, start="2026-09-25T10:15:00")
+        second["датаОкончания"] = "2026-09-25T11:50:00"
+        with patch("card.render_week_card", return_value=b"png") as render:
+            week_card({"1": first, "2": second}, "2026-09-21", "ВКБ51",
+                      {"changed": {"1": "ИЗМЕНЕНО"}, "removed": []})
+        blocks = render.call_args.args[2][4]["blocks"]
+        self.assertEqual([block.get("change") for block in blocks], ["ИЗМЕНЕНО", None])
+
+    def test_text_week_and_day_have_inline_navigation_and_windows(self):
+        second = lesson(start="2026-09-24T10:15:00")
+        second["датаОкончания"] = "2026-09-24T11:50:00"
+        fourth = lesson(code=2, start="2026-09-24T14:15:00")
+        fourth["датаОкончания"] = "2026-09-24T15:50:00"
+        snapshot = {"1": second, "2": fourth}
+        overview, navigation = text_week_view(snapshot, "2026-09-21", "ВКБ51")
+        detail, day_navigation = text_day_view(snapshot, "2026-09-24", "ВКБ51")
+        self.assertIn("<b>Чт 24.09</b>", overview)
+        self.assertIn("<b>ОКНО</b> · 3-я пара", detail)
+        self.assertIn("<b>101</b>", detail)
+        self.assertTrue(any(button["callback_data"] == "td:2026-09-24"
+                            for row in navigation["inline_keyboard"] for button in row))
+        self.assertEqual(day_navigation["inline_keyboard"][0][1]["callback_data"], "tw:2026-09-21")
 
     def test_schedule_card_is_a_readable_png_even_without_lessons(self):
         for snapshot in ({"1": lesson()}, {}):
@@ -215,6 +258,75 @@ class ScheduleTests(unittest.TestCase):
                 self.assertEqual(methods.count("editMessageMedia"), 2)
                 self.assertEqual(methods.count("sendPhoto"), 0)
                 self.assertEqual(app.state["pending"]["telegram"], [])
+
+    def test_future_alert_button_opens_each_affected_week(self):
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, 24, 9, 0, tzinfo=tz)
+
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42",
+                                        "DAILY_TIME": "23:59"}, clear=True):
+                app = Bot(Path(temp))
+                app.state["snapshot"] = {
+                    "1": lesson(start="2026-09-25T09:00:00", room="101"),
+                    "2": lesson(code=2, start="2026-10-01T09:00:00", room="201"),
+                }
+                app.state["group_checked_on"] = "2026-09-24"
+                app.state["telegram_keyboard_version"] = 1
+                updated = {
+                    "1": lesson(start="2026-09-25T09:00:00", room="102"),
+                    "2": lesson(code=2, start="2026-10-01T09:00:00", room="202"),
+                }
+                with patch("bot.datetime", FixedDateTime), \
+                     patch("bot.fetch_schedule", return_value=updated), \
+                     patch("bot.request_json", return_value={"ok": True, "result": []}) as api:
+                    app.cycle()
+                alert = next(call for call in api.call_args_list if call.args[0].endswith("/sendMessage"))
+                self.assertIn("Будущие дни", alert.args[1]["text"])
+                self.assertIn("аудитория: 101 → 102", alert.args[1]["text"])
+                markup = json.loads(alert.args[1]["reply_markup"])
+                callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+                self.assertTrue(callback_data.startswith("changes:"))
+                self.assertEqual(len(app.state["change_batches"]), 1)
+                restarted = Bot(Path(temp))
+                update = {"update_id": 1, "callback_query": {
+                    "id": "cb1", "data": callback_data,
+                    "message": {"chat": {"id": 42, "type": "private"}, "message_id": 5}}}
+                def reply(url, *args, **kwargs):
+                    if url.endswith("/getUpdates"):
+                        return {"ok": True, "result": [update]}
+                    if url.endswith("/sendPhoto"):
+                        return {"ok": True, "result": {"message_id": 91}}
+                    return {"ok": True}
+                with patch("bot.request_json", side_effect=reply) as callback_api:
+                    restarted.telegram_commands("2026-09-24")
+                methods = [call.args[0].rsplit("/", 1)[-1] for call in callback_api.call_args_list]
+                self.assertEqual(methods.count("answerCallbackQuery"), 1)
+                self.assertEqual(methods.count("sendPhoto"), 2)
+                self.assertEqual(restarted.state["pending"]["telegram"], [])
+
+    def test_text_button_edits_same_message_when_a_day_is_chosen(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42"}, clear=True):
+                app = Bot(Path(temp))
+                app.state["snapshot"] = {"1": lesson()}
+                updates = [
+                    {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"}, "text": BUTTON_TEXT}},
+                    {"update_id": 2, "callback_query": {"id": "cb2", "data": "td:2026-09-24",
+                        "message": {"chat": {"id": 42, "type": "private"}, "message_id": 50}}},
+                ]
+                def reply(url, *args, **kwargs):
+                    if url.endswith("/getUpdates"):
+                        return {"ok": True, "result": updates}
+                    return {"ok": True}
+                with patch("bot.request_json", side_effect=reply) as api:
+                    app.telegram_commands("2026-09-24")
+                calls = {call.args[0].rsplit("/", 1)[-1]: call for call in api.call_args_list}
+                self.assertEqual(calls["sendMessage"].args[1]["parse_mode"], "HTML")
+                self.assertEqual(calls["editMessageText"].args[1]["message_id"], 50)
+                self.assertIn("<b>101</b>", calls["editMessageText"].args[1]["text"])
 
     def test_previous_version_state_gets_new_tracked_card(self):
         class FixedDateTime(datetime):
