@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw
 
-from card import MONTHS, draw_leaf, font, palette, text_width, wrap
+from card import MONTHS, draw_leaf, font, palette, status_kind, text_width, wrap
 
 
 WIDTH = 2880
@@ -46,21 +46,24 @@ def fitted_lines(draw: ImageDraw.ImageDraw, value: str,
 
 def draw_lesson(draw: ImageDraw.ImageDraw, x: int, y: int, height: int,
                 item: dict, number: int, total: int, colors: dict) -> None:
-    changed = bool(item.get("change"))
-    accent = "#FF6472" if changed else colors["types"].get(item["type"], colors["accent"])
-    fill = "#4A242D" if changed else colors["tints"].get(item["type"], colors["card"])
+    marker = item.get("change", "")
+    changed = bool(marker)
+    kind = status_kind(marker) if changed else ""
+    status_color = colors["status"].get(kind)
+    accent = colors["types"].get(item["type"], colors["accent"])
+    fill = "#4A2D29" if kind == "removed" else colors["tints"].get(item["type"], colors["card"])
     x2, y2 = x + DAY_WIDTH, y + height
     draw.rounded_rectangle((x, y, x2, y2), radius=20, fill=fill,
-                           outline=accent if changed else None, width=4 if changed else 1)
+                           outline=status_color, width=4 if changed else 1)
     draw.rounded_rectangle((x + 2, y + 18, x + 9, y2 - 18), radius=4, fill=accent)
     kind = item["type"].upper() + (f" · {number}/{total}" if total > 1 else "")
     draw.text((x + 24, y + 15), kind, font=font(20, True), fill=accent)
     if changed:
-        mark = item["change"]
+        mark = "АУД. ИЗМЕНЕНА" if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else marker
         mark_face = font(15, True)
         mark_width = text_width(draw, mark, mark_face) + 20
         draw.rounded_rectangle((x2 - mark_width - 14, y + 11, x2 - 14, y + 42),
-                               radius=8, fill="#FF6472")
+                               radius=8, fill=status_color)
         draw.text((x2 - mark_width - 4, y + 16), mark, font=mark_face, fill="#25151A")
 
     teacher_y = y2 - 92
@@ -84,7 +87,9 @@ def draw_lesson(draw: ImageDraw.ImageDraw, x: int, y: int, height: int,
     room = str(item.get("place") or "—")
     room_y = y2 - 48
     draw.rounded_rectangle((x + 18, room_y, x2 - 16, y2 - 12), radius=10,
-                           fill=colors["room"], outline=accent, width=2)
+                           fill=colors["room"],
+                           outline=status_color if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else accent,
+                           width=2)
     room_face = next((font(size, True) for size in (25, 23, 21, 19, 17)
                       if text_width(draw, room, font(size, True)) < DAY_WIDTH - 104), font(17, True))
     draw.text((x + 30, room_y + 5), "АУД.", font=font(18, True), fill=colors["muted"])

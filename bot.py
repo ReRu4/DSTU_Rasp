@@ -12,6 +12,7 @@ import secrets
 import signal
 import sys
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -116,6 +117,21 @@ FIELDS = (
     "номерПодгруппы", "замена", "ссылка", "тема",
 )
 
+ALERT_LABELS = {
+    "added": "➕ Добавление", "removed": "➖ Удаление",
+    "time": "🕒 Дата и время", "room": "📍 Аудитория",
+    "teacher": "👤 Преподаватель", "subject": "📚 Предмет",
+    "subgroup": "👥 Подгруппа", "replacement": "🔄 Замена",
+    "other": "📝 Тема и ссылка",
+}
+DEFAULT_ALERT_TYPES = tuple(ALERT_LABELS)
+FIELD_ALERT_TYPE = {
+    "датаНачала": "time", "датаОкончания": "time",
+    "дисциплина": "subject", "преподаватель": "teacher",
+    "аудитория": "room", "номерПодгруппы": "subgroup",
+    "замена": "replacement", "ссылка": "other", "тема": "other",
+}
+
 
 def normalize_lesson(raw: dict) -> dict:
     if not isinstance(raw, dict) or not raw.get("код") or not raw.get("датаНачала"):
@@ -155,6 +171,98 @@ def lesson_date(item: dict) -> str:
 
 def lesson_sort(item: dict) -> tuple:
     return (item["датаНачала"], item.get("номерПодгруппы", 0), item["код"])
+
+
+def schedule_changes(old: dict[str, dict], new: dict[str, dict]) -> list[tuple[dict | None, dict | None]]:
+    """Сравнить занятия по содержимому, даже если ДГТУ поменял их коды."""
+    before_left, after_left = dict(old), dict(new)
+    after_by_content: dict[str, list[str]] = defaultdict(list)
+    for code, item in sorted(after_left.items()):
+        signature = json.dumps([item.get(field) for field in FIELDS], ensure_ascii=False,
+                               sort_keys=True, default=str)
+        after_by_content[signature].append(code)
+    for code, item in sorted(before_left.items()):
+        signature = json.dumps([item.get(field) for field in FIELDS], ensure_ascii=False,
+                               sort_keys=True, default=str)
+        matches = after_by_content.get(signature)
+        if matches:
+            before_left.pop(code)
+            after_left.pop(matches.pop(0))
+
+    changes: list[tuple[dict | None, dict | None]] = []
+    def match_unique(key_for) -> None:
+        before_groups: dict[tuple, list[str]] = defaultdict(list)
+        after_groups: dict[tuple, list[str]] = defaultdict(list)
+        for code, item in before_left.items():
+            before_groups[key_for(item)].append(code)
+        for code, item in after_left.items():
+            after_groups[key_for(item)].append(code)
+        for key in before_groups.keys() & after_groups.keys():
+            if len(before_groups[key]) == len(after_groups[key]) == 1:
+                changes.append((before_left.pop(before_groups[key][0]),
+                                after_left.pop(after_groups[key][0])))
+
+    # Сначала используем наиболее точные признаки, чтобы не смешивать
+    # параллельные занятия по одному предмету в одном временном слоте.
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["дисциплина"], item["преподаватель"],
+                                   item["номерПодгруппы"], item["аудитория"]))
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["дисциплина"], item["преподаватель"],
+                                   item["номерПодгруппы"]))
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["дисциплина"], item["аудитория"],
+                                   item["номерПодгруппы"]))
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["дисциплина"], item["преподаватель"],
+                                   item["аудитория"]))
+    # Затем связываем пару в том же слоте и перенос пары в пределах дня.
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["дисциплина"], item["номерПодгруппы"]))
+    match_unique(lambda item: (lesson_date(item), item["дисциплина"],
+                                   item["преподаватель"], item["номерПодгруппы"]))
+    # Если в том же слоте сменили предмет и код, покажем изменение предмета.
+    match_unique(lambda item: (item["датаНачала"], item["датаОкончания"],
+                                   item["преподаватель"], item["номерПодгруппы"]))
+    # Сохранившийся код помогает связать правки, затронувшие несколько полей сразу.
+    for code in sorted(before_left.keys() & after_left.keys()):
+        changes.append((before_left.pop(code), after_left.pop(code)))
+    changes.extend((item, None) for item in before_left.values())
+    changes.extend((None, item) for item in after_left.values())
+    return sorted(changes, key=lambda pair: lesson_sort(pair[1] or pair[0]))
+
+
+def change_types(before: dict | None, after: dict | None) -> set[str]:
+    if before is None:
+        return {"added"}
+    if after is None:
+        return {"removed"}
+    return {FIELD_ALERT_TYPE[field] for field in FIELDS
+            if before.get(field) != after.get(field)}
+
+
+def allowed_change(before: dict | None, after: dict | None,
+                   alert_types: set[str] | None = None) -> bool:
+    return bool(change_types(before, after) & (alert_types if alert_types is not None
+                                               else set(DEFAULT_ALERT_TYPES)))
+
+
+def profile_alert_types(profile: dict) -> set[str]:
+    selected = profile.get("alert_types")
+    return (set(DEFAULT_ALERT_TYPES) if selected is None else
+            set(selected) & set(ALERT_LABELS))
+
+
+def parse_alert_types(value: str) -> list[str]:
+    chosen = {part.strip().lower() for part in value.split(",") if part.strip()}
+    if not chosen or chosen == {"all"}:
+        return list(DEFAULT_ALERT_TYPES)
+    if chosen == {"none"}:
+        return []
+    unknown = chosen - set(ALERT_LABELS)
+    if unknown:
+        raise RuntimeError("Неизвестные виды уведомлений в VK_ALERT_TYPES: " + ", ".join(sorted(unknown)))
+    return [name for name in DEFAULT_ALERT_TYPES if name in chosen]
 
 
 LESSON_TYPES = {"лек": "Лекция", "пр": "Практика", "лаб": "Лабораторная"}
@@ -372,21 +480,35 @@ def week_card(snapshot: dict[str, dict], monday: str, group_name: str,
         changed = (highlights or {}).get("changed") or {}
         blocks = card_blocks(lessons, changed)
         if highlights:
+            removed_for_day = [item for item in highlights.get("removed") or []
+                               if lesson_date(item) == date]
+            removed_pairs = {slot_index(item) + 1 for item in removed_for_day
+                             if slot_index(item) is not None}
+            if removed_pairs:
+                without_duplicate_windows = []
+                for block in blocks:
+                    if not block.get("window"):
+                        without_duplicate_windows.append(block)
+                        continue
+                    for pair in block["pairs"]:
+                        if pair not in removed_pairs:
+                            without_duplicate_windows.append({
+                                "window": True, "start": PAIR_SLOTS[pair - 1][0],
+                                "end": PAIR_SLOTS[pair - 1][1], "pairs": [pair]})
+                blocks = without_duplicate_windows
             for block in blocks:
                 if not block.get("window"):
                     marks = [changed[code] for code in block["codes"] if code in changed]
                     if marks:
-                        block["change"] = "ДОБАВЛЕНО" if all(mark == "ДОБАВЛЕНО" for mark in marks) else "ИЗМЕНЕНО"
-            for old_item in highlights.get("removed") or []:
-                if lesson_date(old_item) != date:
-                    continue
-                subject, _ = subject_and_type(old_item)
+                        block["change"] = marks[0] if len(set(marks)) == 1 else "ИЗМЕНЕНО"
+            for old_item in removed_for_day:
+                subject, lesson_type = subject_and_type(old_item)
                 blocks.append({"removed": True, "change": "УДАЛЕНО",
                                "start": old_item["датаНачала"][11:16],
                                "end": old_item["датаОкончания"][11:16],
                                "pairs": [slot_index(old_item) + 1 if slot_index(old_item) is not None else None],
                                "subject": subject, "teacher": old_item.get("преподаватель", ""),
-                               "place": old_item.get("аудитория", ""), "type": "Занятие"})
+                               "place": old_item.get("аудитория", ""), "type": lesson_type})
             blocks.sort(key=lambda block: (block["start"], 0 if block.get("removed") else 1))
         days.append({"date": date, "blocks": blocks, "slots": slots})
     return render_week_card(group_name, monday, days, card_theme(monday, seasonal))
@@ -420,17 +542,22 @@ def horizontal_week_card(snapshot: dict[str, dict], monday: str, group_name: str
                                        card_theme(monday, seasonal))
 
 
-def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str) -> dict[str, dict]:
+def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str,
+                        alert_types: set[str] | None = None) -> dict[str, dict]:
     weeks: dict[str, dict] = {}
-    for code in set(old) | set(new):
-        before, after = old.get(code), new.get(code)
-        if before == after:
+    for before, after in schedule_changes(old, new):
+        if not allowed_change(before, after, alert_types):
             continue
         if after and lesson_date(after) > today:
             monday = week_start(lesson_date(after))
             marker = weeks.setdefault(monday, {"changed": {}, "removed": []})
-            marker["changed"][code] = ("ДОБАВЛЕНО" if before is None or lesson_date(before) != lesson_date(after)
-                                       else "ИЗМЕНЕНО")
+            if before is None or lesson_date(before) != lesson_date(after):
+                change = "ДОБАВЛЕНО"
+            elif change_types(before, after) == {"room"}:
+                change = "АУДИТОРИЯ ИЗМЕНЕНА"
+            else:
+                change = "ИЗМЕНЕНО"
+            marker["changed"][after["код"]] = change
         if before and lesson_date(before) > today and (after is None or lesson_date(after) != lesson_date(before)):
             monday = week_start(lesson_date(before))
             weeks.setdefault(monday, {"changed": {}, "removed": []})["removed"].append(before)
@@ -531,20 +658,23 @@ def change_value(field: str, value: object) -> str:
     return str(value) if value else "—"
 
 
-def changes_message(old: dict[str, dict], new: dict[str, dict], today: str, group_name: str) -> str:
+def changes_message(old: dict[str, dict], new: dict[str, dict], today: str,
+                    group_name: str, alert_types: set[str] | None = None) -> str:
     lines = []
-    for code in sorted(set(old) | set(new), key=lambda c: lesson_sort(new.get(c) or old[c])):
-        before, after = old.get(code), new.get(code)
-        item = after or before
+    enabled = alert_types if alert_types is not None else set(DEFAULT_ALERT_TYPES)
+    for before, after in schedule_changes(old, new):
         if max(lesson_date(x) for x in (before, after) if x) < today:
+            continue
+        if not allowed_change(before, after, enabled):
             continue
         if before is None:
             lines.append("➕ Добавлено: " + datetime.fromisoformat(lesson_date(after)).strftime("%d.%m.%Y") + "\n" + lesson_text(after))
         elif after is None:
             lines.append("➖ Удалено: " + datetime.fromisoformat(lesson_date(before)).strftime("%d.%m.%Y") + "\n" + lesson_text(before))
-        elif before != after:
+        else:
             details = [f"{LABELS[key]}: {change_value(key, before.get(key))} → {change_value(key, after.get(key))}"
-                       for key in FIELDS if before.get(key) != after.get(key)]
+                       for key in FIELDS if FIELD_ALERT_TYPE[key] in enabled
+                       and before.get(key) != after.get(key)]
             lines.append("✏️ Изменено: " + datetime.fromisoformat(lesson_date(after)).strftime("%d.%m.%Y")
                          + "\n" + lesson_text(after) + "\n    " + "; ".join(details))
     if not lines:
@@ -1051,10 +1181,8 @@ class Bot:
                             self.queue(channel, "Сегодня: " + current_message)
                         if future_message:
                             self.queue_future_change(channel, "Будущие дни: " + future_message, batch_id)
-                        changed = set()
-                        for code in set(old) | set(snapshot):
-                            if old.get(code) != snapshot.get(code):
-                                changed.update(lesson_date(item) for item in (old.get(code), snapshot.get(code)) if item)
+                        changed = {lesson_date(item) for before, after in schedule_changes(old, snapshot)
+                                   for item in (before, after) if item}
                         cards = self.state["cards"].get(channel, {})
                         for date in sorted(d for d in changed if d >= today):
                             if f"day:{date}" in cards:
@@ -1093,6 +1221,7 @@ class MultiBot(Bot):
     def __init__(self, root: Path):
         super().__init__(root)
         self.group_id = int(os.getenv("GROUP_ID", "72244"))
+        self.vk_alert_types = parse_alert_types(os.getenv("VK_ALERT_TYPES", "all"))
         self.needs_refresh = False
         profiles = self.state.setdefault("profiles", {})
         if not self.state.get("profiles_migrated"):
@@ -1114,7 +1243,8 @@ class MultiBot(Bot):
                            "snapshot": None, "pending": [], "cards": {},
                            "daily_queued": "", "weekly_queued": "", "group_checked_on": ""})
             vk.update({"daily_time": self.daily_time, "week_layout": self.week_layout,
-                       "seasonal_theme": self.seasonal_theme})
+                       "seasonal_theme": self.seasonal_theme,
+                       "alert_types": list(self.vk_alert_types)})
             save_state(self.state_file, self.state)
         chat_id = self.state.get("telegram_chat_id")
         if self.telegram_token and chat_id and self.profile_key(int(chat_id)) not in profiles:
@@ -1134,6 +1264,7 @@ class MultiBot(Bot):
             "group_id": old.get("group_id", self.group_id) if legacy else self.group_id,
             "daily_time": self.daily_time, "week_layout": self.week_layout,
             "seasonal_theme": self.seasonal_theme,
+            "alert_types": list(self.vk_alert_types if channel == "vk" else DEFAULT_ALERT_TYPES),
             "snapshot": old.get("snapshot") if legacy else None,
             "pending": list(old.get("pending", {}).get(channel, [])) if legacy else [],
             "daily_queued": old.get("daily_queued", {}).get(channel, "") if legacy else "",
@@ -1244,11 +1375,13 @@ class MultiBot(Bot):
     def settings_view(self, profile: dict) -> tuple[str, dict]:
         layout = "горизонтальное" if profile["week_layout"] == "horizontal" else "вертикальное"
         seasonal = "включено" if profile["seasonal_theme"] else "выключено"
+        alert_count = len(profile_alert_types(profile))
         message = (f"⚙️ Настройки расписания\n\n"
                    f"Группа: {profile['group_name']}\n"
                    f"Отправка: {profile['daily_time']} по Москве\n"
                    f"Неделя: {layout}\n"
-                   f"Сезонное оформление: {seasonal}\n\n"
+                   f"Сезонное оформление: {seasonal}\n"
+                   f"Уведомления: {alert_count} из {len(ALERT_LABELS)} видов\n\n"
                    "Осенняя палитра действует для дат сентября–ноября. "
                    "Изменение времени начнёт действовать со следующей ежедневной отправки.")
         markup = {"inline_keyboard": [
@@ -1258,13 +1391,34 @@ class MultiBot(Bot):
               "callback_data": "settings:layout:" + ("vertical" if profile["week_layout"] == "horizontal" else "horizontal")}],
             [{"text": f"🍂 Сезонная тема · {seasonal}",
               "callback_data": "settings:season:" + ("off" if profile["seasonal_theme"] else "on")}],
+            [{"text": f"🔔 Уведомления · {alert_count}/{len(ALERT_LABELS)}",
+              "callback_data": "settings:alerts"}],
             [{"text": "Пример ↔️", "callback_data": "settings:example:horizontal"},
              {"text": "Пример ↕️", "callback_data": "settings:example:vertical"}],
         ]}
         return message, markup
 
-    def show_settings(self, profile: dict, message_id: int | None = None) -> None:
-        message, markup = self.settings_view(profile)
+    def alert_settings_view(self, profile: dict) -> tuple[str, dict]:
+        selected = profile_alert_types(profile)
+        rows = []
+        options = list(ALERT_LABELS.items())
+        for index in range(0, len(options), 2):
+            rows.append([{"text": ("✅ " if key in selected else "▫️ ") + label,
+                          "callback_data": f"settings:alert:{key}"}
+                         for key, label in options[index:index + 2]])
+        rows.append([{"text": "Включить все", "callback_data": "settings:alert:all:on"},
+                     {"text": "Выключить все", "callback_data": "settings:alert:all:off"}])
+        rows.append([{"text": "⬅️ К настройкам", "callback_data": "settings:back"}])
+        message = ("🔔 Уведомления об изменениях\n\n"
+                   "Отмеченные виды изменений вызывают оповещение. "
+                   "Ежедневная отправка расписания и обновление уже присланных карточек "
+                   "работают независимо от этих переключателей.")
+        return message, {"inline_keyboard": rows}
+
+    def show_settings(self, profile: dict, message_id: int | None = None,
+                      section: str = "main") -> None:
+        message, markup = (self.alert_settings_view(profile) if section == "alerts"
+                           else self.settings_view(profile))
         method = "editMessageText" if message_id else "sendMessage"
         params = {"chat_id": profile["chat_id"], "text": message,
                   "reply_markup": json.dumps(markup, ensure_ascii=False)}
@@ -1274,7 +1428,7 @@ class MultiBot(Bot):
                                 params, method="POST")
         if not response.get("ok") and "message is not modified" not in str(response.get("description", "")):
             if message_id:
-                return self.show_settings(profile)
+                return self.show_settings(profile, section=section)
             raise RuntimeError(f"Telegram: {response.get('description')}")
 
     def send_profile_text_view(self, profile: dict, view: str, date: str,
@@ -1389,6 +1543,26 @@ class MultiBot(Bot):
             self.answer_callback(callback_id)
             profile["seasonal_theme"] = action.endswith(":on")
             self.show_settings(profile, message_id)
+        elif action == "settings:alerts":
+            self.answer_callback(callback_id)
+            self.show_settings(profile, message_id, "alerts")
+        elif action == "settings:back":
+            self.answer_callback(callback_id)
+            self.show_settings(profile, message_id)
+        elif action in ("settings:alert:all:on", "settings:alert:all:off"):
+            self.answer_callback(callback_id)
+            profile["alert_types"] = list(DEFAULT_ALERT_TYPES) if action.endswith(":on") else []
+            self.show_settings(profile, message_id, "alerts")
+        elif action.startswith("settings:alert:") and action.rsplit(":", 1)[1] in ALERT_LABELS:
+            self.answer_callback(callback_id)
+            selected = profile_alert_types(profile)
+            key = action.rsplit(":", 1)[1]
+            if key in selected:
+                selected.remove(key)
+            else:
+                selected.add(key)
+            profile["alert_types"] = [name for name in DEFAULT_ALERT_TYPES if name in selected]
+            self.show_settings(profile, message_id, "alerts")
         elif action in ("settings:group", "settings:time"):
             self.answer_callback(callback_id)
             profile["awaiting"] = action.split(":", 1)[1]
@@ -1549,18 +1723,21 @@ class MultiBot(Bot):
         if old and not snapshot and any(lesson_date(item) >= today for item in old.values()):
             raise RuntimeError("API неожиданно вернул пустое расписание; старые данные сохранены")
         if old is not None:
+            selected_alerts = profile_alert_types(profile)
             current_old = {code: item for code, item in old.items() if lesson_date(item) == today}
             current_new = {code: item for code, item in snapshot.items() if lesson_date(item) == today}
             future_old = {code: item for code, item in old.items() if lesson_date(item) > today}
             future_new = {code: item for code, item in snapshot.items() if lesson_date(item) > today}
-            current_message = changes_message(current_old, current_new, today, profile["group_name"])
-            future_message = changes_message(future_old, future_new, today, profile["group_name"])
+            current_message = changes_message(current_old, current_new, today,
+                                              profile["group_name"], selected_alerts)
+            future_message = changes_message(future_old, future_new, today,
+                                             profile["group_name"], selected_alerts)
             if current_message or future_message:
                 if current_message:
                     self.queue_profile(profile, "Сегодня: " + current_message)
                 if future_message:
                     batch_id = ""
-                    weeks = future_change_weeks(old, snapshot, today)
+                    weeks = future_change_weeks(old, snapshot, today, selected_alerts)
                     if weeks and profile["channel"] == "telegram":
                         batch_id = secrets.token_hex(4)
                         batch_snapshot = {code: item for code, item in snapshot.items()
@@ -1572,16 +1749,14 @@ class MultiBot(Bot):
                             batches.pop(next(iter(batches)))
                     self.queue_profile(profile, "Будущие дни: " + future_message,
                                        "future_change", batch_id)
-                changed_dates = set()
-                for code in set(old) | set(snapshot):
-                    if old.get(code) != snapshot.get(code):
-                        changed_dates.update(lesson_date(item) for item in (old.get(code), snapshot.get(code)) if item)
-                for date in sorted(day for day in changed_dates if day >= today):
-                    if f"day:{date}" in profile["cards"]:
-                        self.queue_profile_card(profile, "day", date, "refresh")
-                    monday = week_start(date)
-                    if f"week:{monday}" in profile["cards"]:
-                        self.queue_profile_card(profile, "week", monday, "refresh")
+            changed_dates = {lesson_date(item) for before, after in schedule_changes(old, snapshot)
+                             for item in (before, after) if item}
+            for date in sorted(day for day in changed_dates if day >= today):
+                if f"day:{date}" in profile["cards"]:
+                    self.queue_profile_card(profile, "day", date, "refresh")
+                monday = week_start(date)
+                if f"week:{monday}" in profile["cards"]:
+                    self.queue_profile_card(profile, "week", monday, "refresh")
         profile["snapshot"] = snapshot
 
     def queue_due(self, now: datetime) -> bool:

@@ -146,6 +146,61 @@ class MultiBotTests(unittest.TestCase):
                 self.assertEqual(send_card.call_args.kwargs["layout_override"], "horizontal")
                 self.assertFalse(send_card.call_args.kwargs["track"])
 
+    def test_alert_settings_toggle_only_one_chat(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                app = MultiBot(Path(temp))
+                first, second = app.new_profile("telegram", 42), app.new_profile("telegram", 77)
+                app.state["profiles"] = {"telegram:42": first, "telegram:77": second}
+                callback = {"id": "cb", "data": "settings:alert:teacher",
+                            "message": {"message_id": 10}}
+                with patch.object(app, "answer_callback"), patch.object(app, "show_settings"):
+                    app.handle_profile_callback(first, callback)
+                self.assertNotIn("teacher", first["alert_types"])
+                self.assertIn("teacher", second["alert_types"])
+                message, markup = app.alert_settings_view(first)
+                self.assertIn("Уведомления об изменениях", message)
+                self.assertTrue(any("▫️ 👤 Преподаватель" == button["text"]
+                                    for row in markup["inline_keyboard"] for button in row))
+
+    def test_code_churn_neither_queues_alert_nor_refreshes_cards(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                app = MultiBot(Path(temp))
+                profile = app.new_profile("telegram", 42)
+                old = {str(number): lesson(code=number, start=f"2026-10-01T{start}:00")
+                       for number, start in enumerate(("08:30", "10:15", "12:00", "14:15"), 1)}
+                new = {str(number + 100): dict(item, код=str(number + 100))
+                       for number, item in enumerate(old.values(), 1)}
+                profile["snapshot"] = old
+                profile["cards"] = {"day:2026-10-01": [1], "week:2026-09-28": [2]}
+                app.process_profile_snapshot(profile, new,
+                                             datetime(2026, 9, 24, 8, 0,
+                                                      tzinfo=ZoneInfo("Europe/Moscow")))
+                self.assertEqual(profile["pending"], [])
+                self.assertEqual(profile["change_batches"], {})
+                self.assertEqual(profile["snapshot"], new)
+
+    def test_disabled_alert_still_refreshes_saved_cards(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                app = MultiBot(Path(temp))
+                profile = app.new_profile("telegram", 42)
+                profile["snapshot"] = {"1": lesson(start="2026-10-01T08:30:00")}
+                profile["alert_types"] = ["room"]
+                profile["cards"] = {"day:2026-10-01": [1], "week:2026-09-28": [2]}
+                changed = lesson(start="2026-10-01T08:30:00")
+                changed["преподаватель"] = "Петров П.П."
+                app.process_profile_snapshot(profile, {"1": changed},
+                                             datetime(2026, 9, 24, 8, 0,
+                                                      tzinfo=ZoneInfo("Europe/Moscow")))
+                self.assertEqual([item["kind"] for item in profile["pending"]],
+                                 ["refresh", "refresh"])
+                self.assertEqual(profile["change_batches"], {})
+
     def test_due_time_queues_once_between_schedule_checks(self):
         with TemporaryDirectory() as temp:
             with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
@@ -207,12 +262,14 @@ class MultiBotTests(unittest.TestCase):
                 app.state_file.write_text(json.dumps(app.state), encoding="utf-8")
             with patch.dict("os.environ", {"VK_COMMUNITY_TOKEN": "test-token",
                                         "VK_PEER_ID": "123", "GROUP_NAME": "Другая",
-                                        "GROUP_ID": "54321", "WEEK_LAYOUT": "vertical"}, clear=True):
+                                        "GROUP_ID": "54321", "WEEK_LAYOUT": "vertical",
+                                        "VK_ALERT_TYPES": "room,time"}, clear=True):
                 restarted = MultiBot(root)
             profile = restarted.state["profiles"]["vk"]
             self.assertEqual(profile["group_name"], "Другая")
             self.assertEqual(profile["group_id"], 54321)
             self.assertEqual(profile["week_layout"], "vertical")
+            self.assertEqual(profile["alert_types"], ["time", "room"])
             self.assertIsNone(profile["snapshot"])
 
 

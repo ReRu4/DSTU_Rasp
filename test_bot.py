@@ -11,8 +11,8 @@ import requests
 from PIL import Image
 
 from bot import (BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, BUTTON_TEXT, Bot,
-                 changes_message, day_message, future_change_weeks, normalize_lesson,
-                 proxy_for_url, request_json, schedule_card, split_message, text_day_view,
+                 changes_message, day_message, future_change_weeks, horizontal_week_card, normalize_lesson,
+                 proxy_for_url, request_json, schedule_card, schedule_changes, split_message, text_day_view,
                  text_week_view, week_card)
 
 
@@ -100,8 +100,71 @@ class ScheduleTests(unittest.TestCase):
         new = {"1": lesson(room="102", start="2026-09-25T09:00:00")}
         weeks = future_change_weeks(old, new, "2026-09-24")
         self.assertEqual(set(weeks), {"2026-09-21", "2026-09-28"})
-        self.assertEqual(weeks["2026-09-21"]["changed"], {"1": "ИЗМЕНЕНО"})
+        self.assertEqual(weeks["2026-09-21"]["changed"], {"1": "АУДИТОРИЯ ИЗМЕНЕНА"})
         self.assertEqual(weeks["2026-09-28"]["removed"][0]["код"], "2")
+
+    def test_future_change_markers_distinguish_added_room_and_other_changes(self):
+        old = {"1": lesson(room="101", start="2026-09-25T09:00:00"),
+               "2": lesson(code=2, start="2026-09-25T10:15:00"),
+               "3": lesson(code=3, start="2026-09-25T12:00:00")}
+        new = {"1": lesson(room="102", start="2026-09-25T09:00:00"),
+               "2": lesson(code=2, start="2026-09-25T10:15:00"),
+               "4": lesson(code=4, start="2026-09-25T14:15:00")}
+        new["2"]["преподаватель"] = "Петров П.П."
+        new["4"]["дисциплина"] = "лаб Новый предмет"
+        weeks = future_change_weeks(old, new, "2026-09-24")
+        self.assertEqual(weeks["2026-09-21"]["changed"], {
+            "1": "АУДИТОРИЯ ИЗМЕНЕНА", "2": "ИЗМЕНЕНО", "4": "ДОБАВЛЕНО"})
+        self.assertEqual([item["код"] for item in weeks["2026-09-21"]["removed"]], ["3"])
+
+    def test_new_api_codes_for_identical_lessons_do_not_trigger_alerts(self):
+        starts = ("08:30", "10:15", "12:00", "14:15", "16:00", "17:45")
+        old, new = {}, {}
+        for index, start in enumerate(starts, 1):
+            before = lesson(code=index, start=f"2026-10-01T{start}:00")
+            after = dict(before, код=str(index + 100))
+            old[before["код"]] = before
+            new[after["код"]] = after
+        self.assertEqual(schedule_changes(old, new), [])
+        self.assertEqual(changes_message(old, new, "2026-09-24", "ВКБ51"), "")
+        self.assertEqual(future_change_weeks(old, new, "2026-09-24"), {})
+
+    def test_new_code_with_room_change_is_one_change(self):
+        old = {"1": lesson(room="101", start="2026-10-01T08:30:00")}
+        after = lesson(code=91, room="102", start="2026-10-01T08:30:00")
+        new = {"91": after}
+        message = changes_message(old, new, "2026-09-24", "ВКБ51")
+        self.assertIn("аудитория: 101 → 102", message)
+        self.assertEqual(message.count("✏️ Изменено:"), 1)
+        self.assertNotIn("Добавлено:", message)
+        self.assertNotIn("Удалено:", message)
+        self.assertEqual(future_change_weeks(old, new, "2026-09-24")
+                         ["2026-09-28"]["changed"], {"91": "АУДИТОРИЯ ИЗМЕНЕНА"})
+
+    def test_parallel_lessons_with_new_codes_keep_their_teachers(self):
+        first = lesson(code=1, room="101", start="2026-10-01T08:30:00")
+        second = lesson(code=2, room="201", start="2026-10-01T08:30:00")
+        second["преподаватель"] = "Петров П.П."
+        changed_first = dict(first, код="91", аудитория="102")
+        changed_second = dict(second, код="92", аудитория="202")
+        changes = schedule_changes({"1": first, "2": second},
+                                   {"91": changed_first, "92": changed_second})
+        self.assertEqual([(before["преподаватель"], after["преподаватель"])
+                          for before, after in changes],
+                         [("Иванов И.И.", "Иванов И.И."), ("Петров П.П.", "Петров П.П.")])
+        self.assertTrue(all(after["аудитория"] != before["аудитория"]
+                            for before, after in changes))
+
+    def test_alert_filter_reports_only_selected_fields(self):
+        old = {"1": lesson(room="101", start="2026-10-01T08:30:00")}
+        after = lesson(room="102", start="2026-10-01T08:30:00")
+        after["преподаватель"] = "Петров П.П."
+        new = {"1": after}
+        self.assertEqual(changes_message(old, new, "2026-09-24", "ВКБ51", {"time"}), "")
+        message = changes_message(old, new, "2026-09-24", "ВКБ51", {"room"})
+        self.assertIn("аудитория: 101 → 102", message)
+        self.assertNotIn("преподаватель:", message)
+        self.assertEqual(future_change_weeks(old, new, "2026-09-24", {"time"}), {})
 
     def test_highlight_marks_only_the_changed_pair_in_a_chain(self):
         first = lesson(start="2026-09-25T08:30:00")
@@ -113,6 +176,31 @@ class ScheduleTests(unittest.TestCase):
                       {"changed": {"1": "ИЗМЕНЕНО"}, "removed": []})
         blocks = render.call_args.args[2][4]["blocks"]
         self.assertEqual([block.get("change") for block in blocks], ["ИЗМЕНЕНО", None])
+
+    def test_removed_pair_replaces_its_window_in_vertical_week(self):
+        removed = lesson(start="2026-09-21T14:15:00")
+        removed["датаОкончания"] = "2026-09-21T15:50:00"
+        remaining = lesson(code=2, start="2026-09-21T16:00:00")
+        remaining["датаОкончания"] = "2026-09-21T17:35:00"
+        with patch("card.render_week_card", return_value=b"png") as render:
+            week_card({"2": remaining}, "2026-09-21", "ВКБ51",
+                      {"changed": {}, "removed": [removed]})
+        blocks = render.call_args.args[2][0]["blocks"]
+        self.assertEqual(sum(block.get("change") == "УДАЛЕНО" for block in blocks), 1)
+        self.assertFalse(any(block.get("window") and 4 in block["pairs"] for block in blocks))
+
+    def test_autumn_week_cards_render_all_three_change_colors(self):
+        old = {"1": lesson(start="2026-09-22T08:30:00"),
+               "2": lesson(code=2, start="2026-09-23T08:30:00")}
+        new = {"1": lesson(room="102", start="2026-09-22T08:30:00"),
+               "3": lesson(code=3, start="2026-09-21T08:30:00")}
+        markers = future_change_weeks(old, new, "2026-09-20")["2026-09-21"]
+        expected = {(255, 228, 92), (121, 168, 244), (241, 109, 101)}
+        for renderer in (week_card, horizontal_week_card):
+            with self.subTest(renderer=renderer.__name__):
+                with Image.open(BytesIO(renderer(new, "2026-09-21", "ВКБ51", markers, True))) as image:
+                    colors = {color for _, color in image.getcolors(100_000)}
+                self.assertTrue(expected <= colors)
 
     def test_text_week_and_day_have_inline_navigation_and_windows(self):
         second = lesson(start="2026-09-24T10:15:00")

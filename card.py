@@ -24,10 +24,11 @@ MONTHS = (
 WEEKDAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье")
 TYPE_COLORS = {"Лекция": "#64D6A2", "Практика": "#FFC267", "Лабораторная": "#BE9AFF"}
 TYPE_TINTS = {"Лекция": "#24483F", "Практика": "#4A3C2D", "Лабораторная": "#3E3454"}
+STATUS_COLORS = {"added": "#FFE45C", "changed": "#79A8F4", "removed": "#F16D65"}
 PALETTES = {
     "classic": {
         "background": BACKGROUND, "card": CARD, "white": WHITE, "muted": MUTED,
-        "accent": CYAN, "types": TYPE_COLORS, "tints": TYPE_TINTS,
+        "accent": CYAN, "types": TYPE_COLORS, "tints": TYPE_TINTS, "status": STATUS_COLORS,
         "header": "#243951", "badge": "#263A50", "room": "#263A50",
         "window": "#172332", "window_outline": "#496176", "window_text": "#B5C8D6",
         "section": "#172538", "week_window": "#233346", "footer": "#8294A9",
@@ -37,6 +38,7 @@ PALETTES = {
         "accent": "#D69A5E",
         "types": {"Лекция": "#BDD18B", "Практика": "#F4C074", "Лабораторная": "#D2AAD4"},
         "tints": {"Лекция": "#3D4A34", "Практика": "#57402D", "Лабораторная": "#4B3A4F"},
+        "status": STATUS_COLORS,
         "header": "#5B4031", "badge": "#554034", "room": "#433932",
         "window": "#302723", "window_outline": "#907760", "window_text": "#D2B899",
         "section": "#302723", "week_window": "#302723", "footer": "#A9957E",
@@ -48,6 +50,14 @@ def palette(theme: str) -> dict:
     if theme not in PALETTES:
         raise ValueError(f"Неизвестная цветовая тема: {theme}")
     return PALETTES[theme]
+
+
+def status_kind(marker: str) -> str:
+    if marker == "ДОБАВЛЕНО":
+        return "added"
+    if marker == "УДАЛЕНО":
+        return "removed"
+    return "changed"
 
 
 def draw_leaf(draw: ImageDraw.ImageDraw, x: int, y: int, size: int,
@@ -346,11 +356,14 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
                 draw.text((874 - text_width(draw, time_text, medium), ry + 19), time_text,
                           font=medium, fill=WHITE)
             else:
-                changed = bool(block.get("change"))
-                accent = "#FF6472" if changed else TYPE_COLORS.get(block["type"], CYAN)
+                marker = block.get("change", "")
+                changed = bool(marker)
+                kind = status_kind(marker) if changed else ""
+                status_color = colors["status"].get(kind)
+                accent = TYPE_COLORS.get(block["type"], CYAN)
                 draw.rounded_rectangle((62, ry, 898, ry + h), radius=16,
-                                       fill="#4A242D" if changed else TYPE_TINTS.get(block["type"], CARD),
-                                       outline="#FF6472" if changed else None, width=4 if changed else 1)
+                                       fill="#4A2D29" if kind == "removed" else TYPE_TINTS.get(block["type"], CARD),
+                                       outline=status_color, width=4 if changed else 1)
                 draw.rounded_rectangle((62, ry + 10, 70, ry + h - 10), radius=3, fill=accent)
                 numbers = [n for n in block["pairs"] if n]
                 label = ((f"{numbers[0]}-я пара" if len(numbers) == 1
@@ -368,16 +381,19 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
                 if row["room_lines"]:
                     room_top = ry + 14
                     draw.rounded_rectangle((690, room_top, 898, room_top + row["room_height"]),
-                                           radius=12, fill=colors["room"], outline=accent, width=3)
+                                           radius=12, fill=colors["room"],
+                                           outline=status_color if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else accent,
+                                           width=3)
                     draw.text((704, room_top + 5), "АУДИТОРИЯ", font=font(17, True), fill=MUTED)
                     for index, line in enumerate(row["room_lines"]):
                         draw.text((704, room_top + 28 + index * 32), line,
                                   font=font(23, True), fill=WHITE)
                 if changed:
-                    marker = block["change"]
-                    draw.rounded_rectangle((300, ry + h - 43, 534, ry + h - 8),
-                                           radius=9, fill="#FF6472")
-                    draw.text((315, ry + h - 39), marker, font=font(21, True), fill="#25151A")
+                    marker_face = font(19, True)
+                    marker_right = 300 + text_width(draw, marker, marker_face) + 30
+                    draw.rounded_rectangle((300, ry + h - 43, marker_right, ry + h - 8),
+                                           radius=9, fill=status_color)
+                    draw.text((315, ry + h - 39), marker, font=marker_face, fill="#25151A")
             ry += h + 10
     draw.text((48, height - 55), "Источник: ДГТУ", font=small, fill=colors["footer"])
     if theme == "autumn":
