@@ -76,7 +76,6 @@ def wrap(draw: ImageDraw.ImageDraw, value: str, face: ImageFont.FreeTypeFont, ma
 
 def prepare_layout(group_name: str, date: str, blocks: list[dict], slot_count: int) -> tuple[list[dict], int]:
     measure = ImageDraw.Draw(Image.new("RGB", (WIDTH, 100), BACKGROUND))
-    title_font = font(32, True)
     detail_font = font(24)
     layout = []
     y = 276
@@ -86,7 +85,12 @@ def prepare_layout(group_name: str, date: str, blocks: list[dict], slot_count: i
             layout.append({"block": block, "y": y, "height": height})
             y += height + 20
             continue
-        title_lines = wrap(measure, block["subject"], title_font, 740)
+        room_lines = (wrap(measure, str(block["place"]), font(25, True), 184)
+                      if block.get("place") else [])
+        room_height = 44 + len(room_lines) * 32 if room_lines else 0
+        title_font = font(30 if room_lines else 32, True)
+        title_lines = wrap(measure, block["subject"], title_font, 540 if room_lines else 740)
+        title_span = max(len(title_lines) * 43, room_height)
         details = []
         if len(block["starts"]) > 1:
             starts = [f"{number}-я {start}" if number else start
@@ -94,8 +98,6 @@ def prepare_layout(group_name: str, date: str, blocks: list[dict], slot_count: i
             details.append(("ПО ПАРАМ", " · ".join(starts)))
         if block.get("teacher"):
             details.append(("ПРЕПОДАВАТЕЛЬ", block["teacher"]))
-        if block.get("place"):
-            details.append(("МЕСТО", block["place"]))
         if block.get("subgroup"):
             details.append(("ПОДГРУППА", str(block["subgroup"])))
         if block.get("theme"):
@@ -103,8 +105,11 @@ def prepare_layout(group_name: str, date: str, blocks: list[dict], slot_count: i
         if block.get("link"):
             details.append(("ССЫЛКА", block["link"]))
         detail_rows = [(label, wrap(measure, value, detail_font, 610)) for label, value in details]
-        height = 126 + len(title_lines) * 43 + sum(max(35, len(lines) * 33) + 9 for _, lines in detail_rows) + 25
-        layout.append({"block": block, "y": y, "height": height, "title_lines": title_lines, "details": detail_rows})
+        height = 126 + title_span + sum(max(35, len(lines) * 33) + 9 for _, lines in detail_rows) + 25
+        layout.append({"block": block, "y": y, "height": height, "title_lines": title_lines,
+                       "title_span": title_span, "room_lines": room_lines, "room_height": room_height,
+                       "title_font_size": 30 if room_lines else 32,
+                       "details": detail_rows})
         y += height + 20
     if not blocks:
         y += 220
@@ -176,9 +181,17 @@ def render_card(group_name: str, date: str, blocks: list[dict], slot_count: int)
         draw.text((904 - chip_width, y1 + 34), type_text, font=regular_22, fill=accent)
         title_y = y1 + 91
         for line in row["title_lines"]:
-            draw.text((78, title_y), line, font=bold_32, fill=WHITE)
+            draw.text((78, title_y), line, font=font(row["title_font_size"], True), fill=WHITE)
             title_y += 43
-        title_y += 15
+        if row["room_lines"]:
+            room_top = y1 + 91
+            draw.rounded_rectangle((662, room_top, 886, room_top + row["room_height"]),
+                                   radius=18, fill="#263A50", outline=accent, width=2)
+            draw.text((678, room_top + 9), "АУДИТОРИЯ", font=font(18, True), fill=MUTED)
+            for index, line in enumerate(row["room_lines"]):
+                draw.text((678, room_top + 37 + index * 32), line,
+                          font=font(25, True), fill=WHITE)
+        title_y = y1 + 91 + row["title_span"] + 15
         for label, lines in row["details"]:
             draw.text((78, title_y), label, font=regular_22, fill=MUTED)
             label_width = text_width(draw, label, regular_22)
@@ -206,11 +219,19 @@ def render_week_card(group_name: str, monday: str, days: list[dict]) -> bytes:
             if block.get("window"):
                 rows.append({"block": block, "height": 66})
             else:
-                title_lines = wrap(measure, block["subject"], title_font, 575)
-                detail = " · ".join(str(part) for part in (block.get("place", ""), block.get("teacher", "")) if part)
-                detail_lines = wrap(measure, detail, font(20), 575) if detail else []
-                rows.append({"block": block, "height": max(108, 24 + len(title_lines) * 33 + len(detail_lines) * 26 + 16),
-                             "title_lines": title_lines, "detail_lines": detail_lines})
+                has_room = bool(block.get("place"))
+                text_width_limit = 390 if has_room else 575
+                title_lines = wrap(measure, block["subject"], title_font, text_width_limit)
+                teacher_lines = (wrap(measure, str(block["teacher"]), font(20), text_width_limit)
+                                 if block.get("teacher") else [])
+                room_lines = (wrap(measure, str(block["place"]), font(19, True), 148)
+                              if has_room else [])
+                room_height = 32 + len(room_lines) * 28 if room_lines else 0
+                rows.append({"block": block,
+                             "height": max(108, 24 + len(title_lines) * 33 + len(teacher_lines) * 26 + 16,
+                                           28 + room_height),
+                             "title_lines": title_lines, "teacher_lines": teacher_lines,
+                             "room_lines": room_lines, "room_height": room_height})
         section_height = 76 + (sum(row["height"] + 10 for row in rows) if rows else 76) + 12
         layouts.append({"day": day, "rows": rows, "y": y, "height": section_height})
         y += section_height + 18
@@ -276,9 +297,17 @@ def render_week_card(group_name: str, monday: str, days: list[dict]) -> bytes:
                     draw.text((300, title_y), line, font=title_font, fill=WHITE)
                     title_y += 33
                 detail_y = title_y + 3
-                for line in row["detail_lines"]:
+                for line in row["teacher_lines"]:
                     draw.text((300, detail_y), line, font=small, fill=MUTED)
                     detail_y += 26
+                if row["room_lines"]:
+                    room_top = ry + 14
+                    draw.rounded_rectangle((710, room_top, 880, room_top + row["room_height"]),
+                                           radius=12, fill="#263A50", outline=accent, width=2)
+                    draw.text((722, room_top + 5), "АУД.", font=font(16, True), fill=MUTED)
+                    for index, line in enumerate(row["room_lines"]):
+                        draw.text((722, room_top + 27 + index * 28), line,
+                                  font=font(19, True), fill=WHITE)
             ry += h + 10
     draw.text((48, height - 55), "Источник: ДГТУ", font=small, fill="#8294A9")
     output = io.BytesIO()

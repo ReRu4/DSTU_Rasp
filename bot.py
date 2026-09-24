@@ -164,6 +164,21 @@ PAIR_SLOTS = (("08:30", "10:05"), ("10:15", "11:50"), ("12:00", "13:35"),
               ("14:15", "15:50"), ("16:00", "17:35"), ("17:45", "19:20"),
               ("19:30", "21:05"))
 PAIR_INDEX = {start: index for index, (start, _) in enumerate(PAIR_SLOTS)}
+BUTTON_TODAY = "📅 Сегодня"
+BUTTON_TOMORROW = "➡️ Завтра"
+BUTTON_PREVIOUS_WEEK = "◀️ Неделя"
+BUTTON_CURRENT_WEEK = "🗓 Эта неделя"
+BUTTON_NEXT_WEEK = "Неделя ▶️"
+
+
+def telegram_keyboard() -> dict:
+    return {
+        "keyboard": [[{"text": BUTTON_TODAY}, {"text": BUTTON_TOMORROW}],
+                     [{"text": BUTTON_PREVIOUS_WEEK}, {"text": BUTTON_NEXT_WEEK}],
+                     [{"text": BUTTON_CURRENT_WEEK}]],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
 
 
 def week_start(date: str) -> str:
@@ -387,7 +402,7 @@ def load_state(path: Path) -> dict:
     if not path.exists():
         return {"snapshot": None, "pending": {"telegram": [], "vk": []},
                 "daily_queued": {}, "weekly_queued": {}, "cards": {},
-                "card_tracking_ready": True, "telegram_offset": 0}
+                "card_tracking_ready": True, "telegram_offset": 0, "telegram_keyboard_version": 0}
     state = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(state, dict) or not isinstance(state.get("pending"), dict):
         raise RuntimeError("Повреждён файл состояния; восстановите его из копии")
@@ -396,6 +411,7 @@ def load_state(path: Path) -> dict:
     state.setdefault("card_tracking_ready", "cards" in state)
     state.setdefault("cards", {})
     state.setdefault("telegram_offset", 0)
+    state.setdefault("telegram_keyboard_version", 0)
     state.setdefault("snapshot", None)
     for channel in ("telegram", "vk"):
         state["pending"].setdefault(channel, [])
@@ -429,7 +445,11 @@ class Bot:
         self.group_id = int(self.state.get("group_id", self.group_id))
         configured_chat = os.getenv("TELEGRAM_CHAT_ID", "")
         if configured_chat:
-            self.state["telegram_chat_id"] = int(configured_chat)
+            new_chat_id = int(configured_chat)
+            if self.state.get("telegram_chat_id") != new_chat_id:
+                self.state["telegram_keyboard_version"] = 0
+                self.state.pop("telegram_week_cursor", None)
+            self.state["telegram_chat_id"] = new_chat_id
         if self.telegram_token and self.pair_code == "замените-на-свой-секретный-код":
             raise RuntimeError("Замените пример TELEGRAM_PAIR_CODE в .env на свой код")
         if self.telegram_token and not self.state.get("telegram_chat_id") and not self.pair_code:
@@ -462,22 +482,41 @@ class Bot:
                 raise RuntimeError(f"ВКонтакте: {response['error'].get('error_msg')}")
 
     def send_telegram_chat(self, chat_id: int, message: str) -> None:
+        params = {"chat_id": chat_id, "text": message}
+        if chat_id == self.state.get("telegram_chat_id"):
+            params["reply_markup"] = json.dumps(telegram_keyboard(), ensure_ascii=False)
         response = request_json(
             f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
-            {"chat_id": chat_id, "text": message}, method="POST",
+            params, method="POST",
         )
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
+        if chat_id == self.state.get("telegram_chat_id"):
+            self.state["telegram_keyboard_version"] = 1
 
     def send_telegram_card(self, chat_id: int, png: bytes, caption: str) -> int | None:
         response = request_json(
             f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto",
-            {"chat_id": chat_id, "caption": caption}, method="POST",
+            {"chat_id": chat_id, "caption": caption,
+             "reply_markup": json.dumps(telegram_keyboard(), ensure_ascii=False)}, method="POST",
             files={"photo": ("raspisanie.png", png, "image/png")},
         )
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
+        self.state["telegram_keyboard_version"] = 1
         return (response.get("result") or {}).get("message_id")
+
+    def ensure_telegram_keyboard(self) -> None:
+        if not self.telegram_token or not self.state.get("telegram_chat_id"):
+            return
+        if self.state.get("telegram_keyboard_version") == 1:
+            return
+        try:
+            self.send_telegram_chat(self.state["telegram_chat_id"],
+                                    "Кнопки управления расписанием появились ниже. Выберите день или листайте недели.")
+            save_state(self.state_file, self.state)
+        except Exception as exc:
+            LOG.warning("Не удалось показать кнопки Telegram: %s", exc)
 
     def edit_telegram_card(self, chat_id: int, message_id: int, png: bytes, caption: str) -> None:
         response = request_json(
@@ -623,6 +662,29 @@ class Bot:
                 pending.pop(0)
                 save_state(self.state_file, self.state)
 
+    def navigate_week(self, today: str, step: int) -> None:
+        if self.state.get("snapshot") is None:
+            self.send("telegram", "Расписание пока не загружено.")
+            return
+        anchor = self.state.get("telegram_week_cursor") or week_start(today)
+        try:
+            anchor = week_start(anchor)
+        except ValueError:
+            anchor = week_start(today)
+        target = (datetime.fromisoformat(anchor) + timedelta(days=7 * step)).date().isoformat()
+        snapshot = self.state.get("snapshot") or {}
+        if snapshot:
+            dates = [lesson_date(item) for item in snapshot.values()]
+            first, last = week_start(min(dates)), week_start(max(dates))
+            if target < first:
+                self.send("telegram", "Более ранних недель нет в полученном от ДГТУ расписании.")
+                return
+            if target > last:
+                self.send("telegram", "Более поздних недель пока нет в полученном от ДГТУ расписании.")
+                return
+        self.state["telegram_week_cursor"] = target
+        self.send_week("telegram", target)
+
     def telegram_commands(self, today: str) -> None:
         if not self.telegram_token:
             return
@@ -649,7 +711,7 @@ class Bot:
                     if self.pair_code and secrets.compare_digest(argument, self.pair_code):
                         self.state["telegram_chat_id"] = chat_id
                         save_state(self.state_file, self.state)
-                        self.send("telegram", f"Готово! Вы подписаны на расписание {self.group_name}. Команды: /today, /tomorrow, /help.")
+                        self.send("telegram", f"Готово! Вы подписаны на расписание {self.group_name}. Используйте кнопки ниже, чтобы выбрать день или листать недели.")
                         if self.state.get("snapshot") is not None:
                             self.send_schedule("telegram", today)
                             if datetime.now(MOSCOW).strftime("%H:%M") >= self.daily_time:
@@ -657,16 +719,22 @@ class Bot:
                     else:
                         self.send_telegram_chat(chat_id, "Код не подошёл. Отправьте команду /start ПРОБЕЛ ВАШ_КОД — именно с косой чертой и кодом из файла .env.")
                 elif chat_id == self.state.get("telegram_chat_id"):
-                    if verb == "/today":
+                    if verb == "/today" or command == BUTTON_TODAY:
                         self.send_schedule("telegram", today)
-                    elif verb == "/tomorrow":
+                    elif verb == "/tomorrow" or command == BUTTON_TOMORROW:
                         next_day = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
                         self.send_schedule("telegram", next_day)
-                    elif verb in ("/week", "/nextweek"):
+                    elif verb == "/week" or command == BUTTON_CURRENT_WEEK:
                         monday = week_start(today)
-                        if verb == "/nextweek":
-                            monday = (datetime.fromisoformat(monday) + timedelta(days=7)).date().isoformat()
+                        self.state["telegram_week_cursor"] = monday
                         self.send_week("telegram", monday)
+                    elif verb == "/nextweek":
+                        self.state["telegram_week_cursor"] = week_start(today)
+                        self.navigate_week(today, 1)
+                    elif command == BUTTON_PREVIOUS_WEEK:
+                        self.navigate_week(today, -1)
+                    elif command == BUTTON_NEXT_WEEK:
+                        self.navigate_week(today, 1)
                     elif verb in ("/today_text", "/tomorrow_text"):
                         date = today if verb == "/today_text" else (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
                         message = (day_message(self.state["snapshot"], date, self.group_name)
@@ -674,7 +742,7 @@ class Bot:
                         for part in split_message(message):
                             self.send("telegram", part)
                     elif verb in ("/start", "/help"):
-                        self.send("telegram", "Команды: /today, /tomorrow — карточки на день; /week, /nextweek — на неделю; /today_text, /tomorrow_text — текст. Карточки обновляются при изменениях.")
+                        self.send("telegram", "Выберите день или листайте недели кнопками ниже. Команды /today, /tomorrow, /week и /nextweek тоже работают; /today_text и /tomorrow_text дают текст.")
                 save_state(self.state_file, self.state)
         except Exception as exc:
             LOG.error("Ошибка обработки команд Telegram: %s", exc)
@@ -735,6 +803,7 @@ class Bot:
         except Exception as exc:
             LOG.error("Не удалось обновить расписание: %s", exc)
         self.telegram_commands(today)
+        self.ensure_telegram_keyboard()
         self.drain(today)
 
 

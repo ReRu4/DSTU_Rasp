@@ -10,7 +10,9 @@ from unittest.mock import patch
 import requests
 from PIL import Image
 
-from bot import Bot, changes_message, day_message, normalize_lesson, proxy_for_url, request_json, schedule_card, split_message, week_card
+from bot import (BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, Bot,
+                 changes_message, day_message, normalize_lesson, proxy_for_url,
+                 request_json, schedule_card, split_message, week_card)
 
 
 def lesson(code=1, room="101", start="2026-09-24T09:00:00"):
@@ -102,6 +104,39 @@ class ScheduleTests(unittest.TestCase):
                     app.send_schedule("telegram", "2026-09-24")
                 self.assertIn("/sendPhoto", send.call_args.args[0])
                 self.assertEqual(send.call_args.kwargs["files"]["photo"][2], "image/png")
+                markup = json.loads(send.call_args.args[1]["reply_markup"])
+                self.assertTrue(markup["is_persistent"])
+                labels = [button["text"] for row in markup["keyboard"] for button in row]
+                self.assertIn(BUTTON_PREVIOUS_WEEK, labels)
+                self.assertIn(BUTTON_NEXT_WEEK, labels)
+
+    def test_existing_chat_gets_navigation_keyboard_once(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42"}, clear=True):
+                app = Bot(Path(temp))
+                with patch("bot.request_json", return_value={"ok": True}) as api:
+                    app.ensure_telegram_keyboard()
+                    app.ensure_telegram_keyboard()
+                self.assertEqual(api.call_count, 1)
+                markup = json.loads(api.call_args.args[1]["reply_markup"])
+                self.assertTrue(markup["resize_keyboard"])
+                self.assertEqual(app.state["telegram_keyboard_version"], 1)
+
+    def test_week_buttons_can_browse_multiple_past_weeks(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42"}, clear=True):
+                app = Bot(Path(temp))
+                app.state["snapshot"] = {"1": lesson(start="2026-09-01T09:00:00"), "2": lesson(code=2)}
+                labels = [BUTTON_CURRENT_WEEK, BUTTON_PREVIOUS_WEEK,
+                          BUTTON_PREVIOUS_WEEK, BUTTON_NEXT_WEEK]
+                updates = [{"update_id": index, "message": {"chat": {"id": 42, "type": "private"}, "text": label}}
+                           for index, label in enumerate(labels, 1)]
+                with patch("bot.request_json", return_value={"ok": True, "result": updates}), \
+                     patch.object(app, "send_week") as send_week:
+                    app.telegram_commands("2026-09-24")
+                dates = [call.args[1] for call in send_week.call_args_list]
+                self.assertEqual(dates, ["2026-09-21", "2026-09-14", "2026-09-07", "2026-09-14"])
+                self.assertEqual(app.state["telegram_week_cursor"], "2026-09-14")
 
     def test_week_command_sends_current_week_card(self):
         with TemporaryDirectory() as temp:
