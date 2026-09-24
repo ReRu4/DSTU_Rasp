@@ -1155,66 +1155,19 @@ class MultiBot(Bot):
                 if (profile["channel"] == "telegram" and self.telegram_token)
                 or (profile["channel"] == "vk" and self.vk_token)]
 
-    @staticmethod
-    def navigation_markup(view: str, date: str) -> dict:
-        day = datetime.fromisoformat(date).date()
-        if view == "day":
-            first = [
-                {"text": "◀️ День", "callback_data": f"nav:day:{(day - timedelta(days=1)).isoformat()}"},
-                {"text": "🗓 К неделе", "callback_data": f"nav:week:{week_start(date)}"},
-                {"text": "День ▶️", "callback_data": f"nav:day:{(day + timedelta(days=1)).isoformat()}"},
-            ]
-        else:
-            first = [
-                {"text": "◀️ Неделя", "callback_data": f"nav:week:{(day - timedelta(days=7)).isoformat()}"},
-                {"text": "🗓 Эта неделя", "callback_data": "nav:currentweek"},
-                {"text": "Неделя ▶️", "callback_data": f"nav:week:{(day + timedelta(days=7)).isoformat()}"},
-            ]
-        return {"inline_keyboard": [
-            first,
-            [{"text": "📅 Сегодня", "callback_data": "nav:today"},
-             {"text": "➡️ Завтра", "callback_data": "nav:tomorrow"}],
-            [{"text": "📝 Текст", "callback_data": f"nav:text:{week_start(date)}"},
-             {"text": "⚙️ Настройки", "callback_data": "nav:settings"}],
-        ]}
-
     def send_telegram_chat(self, chat_id: int, message: str, inline_markup: dict | None = None) -> None:
         params = {"chat_id": chat_id, "text": message}
         profile = self.profile_for_chat(chat_id)
         if inline_markup is not None:
             params["reply_markup"] = json.dumps(inline_markup, ensure_ascii=False)
         elif profile:
-            today = datetime.now(MOSCOW).date().isoformat()
-            params["reply_markup"] = json.dumps(self.navigation_markup("day", today), ensure_ascii=False)
+            params["reply_markup"] = json.dumps(telegram_keyboard(), ensure_ascii=False)
         response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
                                 params, method="POST")
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
-
-    def send_telegram_card(self, chat_id: int, png: bytes, caption: str,
-                           markup: dict | None = None) -> int | None:
-        response = request_json(
-            f"https://api.telegram.org/bot{self.telegram_token}/sendPhoto",
-            {"chat_id": chat_id, "caption": caption,
-             "reply_markup": json.dumps(markup or self.navigation_markup(
-                 "day", datetime.now(MOSCOW).date().isoformat()), ensure_ascii=False)},
-            method="POST", files={"photo": ("raspisanie.png", png, "image/png")})
-        if not response.get("ok"):
-            raise RuntimeError(f"Telegram: {response.get('description')}")
-        return (response.get("result") or {}).get("message_id")
-
-    def edit_telegram_card(self, chat_id: int, message_id: int, png: bytes,
-                           caption: str, markup: dict | None = None) -> None:
-        response = request_json(
-            f"https://api.telegram.org/bot{self.telegram_token}/editMessageMedia",
-            {"chat_id": chat_id, "message_id": message_id,
-             "media": json.dumps({"type": "photo", "media": "attach://card", "caption": caption},
-                                 ensure_ascii=False),
-             "reply_markup": json.dumps(markup or self.navigation_markup(
-                 "day", datetime.now(MOSCOW).date().isoformat()), ensure_ascii=False)},
-            method="POST", files={"card": ("raspisanie.png", png, "image/png")})
-        if not response.get("ok"):
-            raise RuntimeError(f"Telegram: {response.get('description')}")
+        if profile and inline_markup is None:
+            profile["keyboard_version"] = 2
 
     def send_profile_message(self, profile: dict, message: str,
                              inline_markup: dict | None = None) -> None:
@@ -1249,7 +1202,6 @@ class MultiBot(Bot):
         key = f"{view}:{date}"
         remembered = profile["cards"].get(key) or []
         ids = remembered if isinstance(remembered, list) else [remembered]
-        markup = self.navigation_markup(view, date) if profile["channel"] == "telegram" else None
         try:
             png = self.render_profile_card(profile, view, date, layout_override=layout_override)
             if replace and ids:
@@ -1257,7 +1209,7 @@ class MultiBot(Bot):
                 for message_id in ids:
                     try:
                         if profile["channel"] == "telegram":
-                            self.edit_telegram_card(profile["chat_id"], message_id, png, caption, markup)
+                            self.edit_telegram_card(profile["chat_id"], message_id, png, caption)
                         else:
                             self.edit_vk_card(message_id, png, caption)
                         updated.append(message_id)
@@ -1266,8 +1218,10 @@ class MultiBot(Bot):
                 if len(updated) == len(ids):
                     return
                 ids = updated
-            message_id = (self.send_telegram_card(profile["chat_id"], png, caption, markup)
+            message_id = (self.send_telegram_card(profile["chat_id"], png, caption)
                           if profile["channel"] == "telegram" else self.send_vk_card(png, caption))
+            if profile["channel"] == "telegram":
+                profile["keyboard_version"] = 2
             if track and message_id is not None:
                 ids = (ids + [message_id])[-20:]
                 profile["cards"][key] = ids
@@ -1280,17 +1234,12 @@ class MultiBot(Bot):
 
     def ensure_telegram_keyboards(self) -> None:
         for profile in self.active_profiles():
-            if profile["channel"] == "telegram" and profile.get("keyboard_version") != 3:
+            if profile["channel"] == "telegram" and profile.get("keyboard_version") != 2:
                 try:
-                    self.send_telegram_chat(
-                        profile["chat_id"],
-                        "Постоянная клавиатура убрана. Навигация теперь под карточками и сообщениями.",
-                        {"remove_keyboard": True})
-                    self.send_profile_message(profile, "Выберите день, неделю или настройки кнопками ниже.")
-                    profile["keyboard_version"] = 3
-                    save_state(self.state_file, self.state)
+                    self.send_telegram_chat(profile["chat_id"],
+                                            "Кнопки расписания обновлены. Откройте «Настройки», чтобы выбрать группу и оформление.")
                 except Exception as exc:
-                    LOG.warning("Не удалось скрыть клавиатуру чата %s: %s", profile["chat_id"], exc)
+                    LOG.warning("Не удалось показать кнопки чату %s: %s", profile["chat_id"], exc)
 
     def settings_view(self, profile: dict) -> tuple[str, dict]:
         layout = "горизонтальное" if profile["week_layout"] == "horizontal" else "вертикальное"
@@ -1311,7 +1260,6 @@ class MultiBot(Bot):
               "callback_data": "settings:season:" + ("off" if profile["seasonal_theme"] else "on")}],
             [{"text": "Пример ↔️", "callback_data": "settings:example:horizontal"},
              {"text": "Пример ↕️", "callback_data": "settings:example:vertical"}],
-            [{"text": "📅 К расписанию", "callback_data": "nav:today"}],
         ]}
         return message, markup
 
@@ -1337,10 +1285,6 @@ class MultiBot(Bot):
             return
         message, markup = (text_week_view(snapshot, date, profile["group_name"]) if view == "week"
                            else text_day_view(snapshot, date, profile["group_name"]))
-        markup["inline_keyboard"].append([
-            {"text": "📅 Карточка", "callback_data": f"nav:{view}:{date}"},
-            {"text": "⚙️ Настройки", "callback_data": "nav:settings"},
-        ])
         method = "editMessageText" if message_id else "sendMessage"
         params = {"chat_id": profile["chat_id"], "text": message, "parse_mode": "HTML",
                   "reply_markup": json.dumps(markup, ensure_ascii=False)}
@@ -1387,8 +1331,8 @@ class MultiBot(Bot):
                 else:
                     png = week_card(batch["snapshot"], monday, profile["group_name"],
                                     marker, profile["seasonal_theme"])
-                self.send_telegram_card(profile["chat_id"], png, caption,
-                                        self.navigation_markup("week", monday))
+                self.send_telegram_card(profile["chat_id"], png, caption)
+                profile["keyboard_version"] = 2
             except Exception as exc:
                 LOG.warning("Не удалось показать изменения за %s: %s", monday, exc)
                 for part in split_message(week_message(batch["snapshot"], monday, profile["group_name"])):
@@ -1398,9 +1342,7 @@ class MultiBot(Bot):
         awaiting = profile.get("awaiting")
         if awaiting == "time":
             if not valid_time(value):
-                self.send_profile_message(
-                    profile, "Введите время в формате ЧЧ:ММ, например 08:00 или 19:30.",
-                    {"force_reply": True, "input_field_placeholder": "Например, 19:30"})
+                self.send_profile_message(profile, "Введите время в формате ЧЧ:ММ, например 08:00 или 19:30.")
                 return
             profile["daily_time"] = value
             profile["awaiting"] = ""
@@ -1409,18 +1351,14 @@ class MultiBot(Bot):
             return
         if awaiting == "group":
             if not 1 <= len(value) <= 40:
-                self.send_profile_message(
-                    profile, "Введите короткое название группы, например ВКБ51.",
-                    {"force_reply": True, "input_field_placeholder": "Например, ВКБ51"})
+                self.send_profile_message(profile, "Введите короткое название группы, например ВКБ51.")
                 return
             try:
                 group_id = find_group_id(value)
                 snapshot = fetch_schedule(group_id, value)
             except Exception as exc:
                 LOG.warning("Не удалось выбрать группу %s: %s", value, exc)
-                self.send_profile_message(
-                    profile, "Группа не найдена или ДГТУ сейчас недоступен. Проверьте название и попробуйте ещё раз.",
-                    {"force_reply": True, "input_field_placeholder": "Название группы"})
+                self.send_profile_message(profile, "Группа не найдена или ДГТУ сейчас недоступен. Проверьте название и попробуйте ещё раз.")
                 return
             profile.update({"group_name": value, "group_id": group_id, "snapshot": snapshot,
                             "group_checked_on": today, "pending": [], "cards": {},
@@ -1443,47 +1381,6 @@ class MultiBot(Bot):
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
                 self.send_profile_text_view(profile, "week" if view == "tw" else "day",
                                             date, message_id)
-        elif action.startswith("nav:"):
-            self.answer_callback(callback_id)
-            today = datetime.now(MOSCOW).date().isoformat()
-            if action == "nav:today":
-                self.send_profile_card(profile, "day", today)
-            elif action == "nav:tomorrow":
-                next_day = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
-                self.send_profile_card(profile, "day", next_day)
-            elif action == "nav:currentweek":
-                current = week_start(today)
-                profile["week_cursor"] = current
-                self.send_profile_card(profile, "week", current)
-            elif action == "nav:settings":
-                profile["awaiting"] = ""
-                self.show_settings(profile)
-            else:
-                parts = action.split(":", 2)
-                if len(parts) != 3 or parts[1] not in ("day", "week", "text") or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[2]):
-                    return
-                view, date = parts[1], parts[2]
-                if view == "text":
-                    self.send_profile_text_view(profile, "week", week_start(date))
-                elif view == "week":
-                    target = week_start(date)
-                    snapshot = profile.get("snapshot") or {}
-                    if snapshot:
-                        weeks = [week_start(lesson_date(item)) for item in snapshot.values()]
-                        if target < min(weeks) or target > max(weeks):
-                            self.send_profile_message(profile, "Этой недели нет в доступном расписании ДГТУ.")
-                            return
-                    profile["week_cursor"] = target
-                    self.send_profile_card(profile, "week", target)
-                else:
-                    snapshot = profile.get("snapshot") or {}
-                    if snapshot:
-                        dates = [lesson_date(item) for item in snapshot.values()]
-                        if date < min(dates) or date > max(dates):
-                            self.send_profile_message(profile, "Этого дня нет в доступном расписании ДГТУ.")
-                            return
-                    profile["week_cursor"] = week_start(date)
-                    self.send_profile_card(profile, "day", date)
         elif action in ("settings:layout:horizontal", "settings:layout:vertical"):
             self.answer_callback(callback_id)
             profile["week_layout"] = action.rsplit(":", 1)[1]
@@ -1498,9 +1395,7 @@ class MultiBot(Bot):
             prompt = ("Напишите название группы так, как на сайте ДГТУ, например ВКБ51."
                       if profile["awaiting"] == "group" else
                       "Напишите время отправки по Москве в формате ЧЧ:ММ, например 08:00.")
-            placeholder = "Например, ВКБ51" if profile["awaiting"] == "group" else "Например, 08:00"
-            self.send_profile_message(profile, prompt,
-                                      {"force_reply": True, "input_field_placeholder": placeholder})
+            self.send_profile_message(profile, prompt)
         elif action.startswith("settings:example:"):
             self.answer_callback(callback_id)
             layout = action.rsplit(":", 1)[1]
@@ -1557,10 +1452,7 @@ class MultiBot(Bot):
                             self.state["profiles"][self.profile_key(chat_id)] = profile
                             save_state(self.state_file, self.state)
                             self.needs_refresh = True
-                            self.send_telegram_chat(
-                                chat_id, f"Готово! Вы подписаны на расписание {profile['group_name']}.",
-                                {"remove_keyboard": True})
-                            profile["keyboard_version"] = 3
+                            self.send_profile_message(profile, f"Готово! Вы подписаны на расписание {profile['group_name']}.")
                             self.show_settings(profile)
                     elif verb == "/start":
                         self.send_telegram_chat(chat_id, "Код не подошёл. Отправьте /start ПРОБЕЛ ВАШ_КОД из файла .env.")
@@ -1639,12 +1531,8 @@ class MultiBot(Bot):
                     if item.get("format") == "card":
                         self.send_profile_card(profile, view or "day", date, replace=item["kind"] == "refresh")
                     elif profile["channel"] == "telegram" and item.get("batch_id"):
-                        markup = {"inline_keyboard": [
-                            [{"text": "🗓 Показать изменения",
-                              "callback_data": f"changes:{item['batch_id']}"}],
-                            [{"text": "📅 Сегодня", "callback_data": "nav:today"},
-                             {"text": "⚙️ Настройки", "callback_data": "nav:settings"}],
-                        ]}
+                        markup = {"inline_keyboard": [[{"text": "🗓 Показать изменения",
+                                                       "callback_data": f"changes:{item['batch_id']}"}]]}
                         self.send_profile_message(profile, item["text"], markup)
                     else:
                         self.send_profile_message(profile, item["text"])

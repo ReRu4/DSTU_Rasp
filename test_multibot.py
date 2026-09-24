@@ -94,7 +94,7 @@ class MultiBotTests(unittest.TestCase):
                 for profile in (first, second):
                     profile["snapshot"] = snapshot
                     profile["group_checked_on"] = "2026-09-24"
-                    profile["keyboard_version"] = 3
+                    profile["keyboard_version"] = 2
                 second["daily_time"] = "10:00"
                 with patch("bot.datetime", FixedDateTime), \
                      patch.object(app, "telegram_commands", return_value=True), \
@@ -214,66 +214,6 @@ class MultiBotTests(unittest.TestCase):
             self.assertEqual(profile["group_id"], 54321)
             self.assertEqual(profile["week_layout"], "vertical")
             self.assertIsNone(profile["snapshot"])
-
-    def test_old_reply_keyboard_is_removed_once(self):
-        with TemporaryDirectory() as temp:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
-                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
-                app = MultiBot(Path(temp))
-                profile = app.new_profile("telegram", 42)
-                profile["keyboard_version"] = 2
-                app.state["profiles"] = {"telegram:42": profile}
-                calls = []
-                def reply(url, params=None, **kwargs):
-                    calls.append((url, params))
-                    return {"ok": True}
-                with patch("bot.request_json", side_effect=reply):
-                    app.ensure_telegram_keyboards()
-                    app.ensure_telegram_keyboards()
-                self.assertEqual(profile["keyboard_version"], 3)
-                self.assertEqual(len(calls), 2)
-                self.assertEqual(json.loads(calls[0][1]["reply_markup"]), {"remove_keyboard": True})
-                self.assertIn("inline_keyboard", json.loads(calls[1][1]["reply_markup"]))
-
-    def test_photo_has_inline_navigation_and_input_uses_force_reply(self):
-        with TemporaryDirectory() as temp:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
-                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
-                app = MultiBot(Path(temp))
-                profile = app.new_profile("telegram", 42)
-                profile["snapshot"] = {"1": lesson()}
-                app.state["profiles"] = {"telegram:42": profile}
-                calls = []
-                def reply(url, params=None, **kwargs):
-                    calls.append((url, params))
-                    return {"ok": True, "result": {"message_id": 17}}
-                with patch("bot.request_json", side_effect=reply):
-                    app.send_profile_card(profile, "day", "2026-09-24")
-                    with patch.object(app, "answer_callback"):
-                        app.handle_profile_callback(profile, {"id": "cb", "data": "settings:time"})
-                photo_markup = json.loads(calls[0][1]["reply_markup"])
-                prompt_markup = json.loads(calls[1][1]["reply_markup"])
-                self.assertIn("inline_keyboard", photo_markup)
-                self.assertNotIn("keyboard", photo_markup)
-                self.assertTrue(prompt_markup["force_reply"])
-                self.assertEqual(profile["awaiting"], "time")
-
-    def test_inline_week_navigation_uses_clicked_card_and_checks_range(self):
-        with TemporaryDirectory() as temp:
-            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
-                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
-                app = MultiBot(Path(temp))
-                profile = app.new_profile("telegram", 42)
-                profile["snapshot"] = {"1": lesson()}
-                app.state["profiles"] = {"telegram:42": profile}
-                with patch.object(app, "answer_callback"), \
-                     patch.object(app, "send_profile_card") as card, \
-                     patch.object(app, "send_profile_message") as message:
-                    app.handle_profile_callback(profile, {"id": "cb", "data": "nav:week:2026-09-21"})
-                    app.handle_profile_callback(profile, {"id": "cb", "data": "nav:week:2026-09-14"})
-                self.assertEqual(card.call_count, 1)
-                self.assertEqual(card.call_args.args[1:], ("week", "2026-09-21"))
-                self.assertEqual(message.call_count, 1)
 
 
 if __name__ == "__main__":
