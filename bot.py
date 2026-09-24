@@ -172,13 +172,15 @@ BUTTON_PREVIOUS_WEEK = "◀️ Неделя"
 BUTTON_CURRENT_WEEK = "🗓 Эта неделя"
 BUTTON_NEXT_WEEK = "Неделя ▶️"
 BUTTON_TEXT = "📝 Текст"
+BUTTON_SETTINGS = "⚙️ Настройки"
 
 
 def telegram_keyboard() -> dict:
     return {
         "keyboard": [[{"text": BUTTON_TODAY}, {"text": BUTTON_TOMORROW}],
                      [{"text": BUTTON_PREVIOUS_WEEK}, {"text": BUTTON_NEXT_WEEK}],
-                     [{"text": BUTTON_CURRENT_WEEK}, {"text": BUTTON_TEXT}]],
+                     [{"text": BUTTON_CURRENT_WEEK}, {"text": BUTTON_TEXT}],
+                     [{"text": BUTTON_SETTINGS}]],
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -187,6 +189,26 @@ def telegram_keyboard() -> dict:
 def week_start(date: str) -> str:
     day = datetime.fromisoformat(date).date()
     return (day - timedelta(days=day.weekday())).isoformat()
+
+
+def card_theme(date: str, seasonal: bool = True) -> str:
+    """Осенняя палитра действует для карточек сентября–ноября."""
+    return "autumn" if seasonal and datetime.fromisoformat(date).month in (9, 10, 11) else "classic"
+
+
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    raise RuntimeError(f"{name} должен быть true или false")
+
+
+def valid_time(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value))
 
 
 def slot_index(item: dict) -> int | None:
@@ -328,16 +350,17 @@ def card_blocks(lessons: list[dict], change_kinds: dict[str, str] | None = None)
     return blocks
 
 
-def schedule_card(snapshot: dict[str, dict], date: str, group_name: str) -> bytes:
+def schedule_card(snapshot: dict[str, dict], date: str, group_name: str,
+                  seasonal: bool = True) -> bytes:
     from card import render_card
 
     lessons = sorted((x for x in snapshot.values() if lesson_date(x) == date), key=lesson_sort)
     slots = len({(x["датаНачала"], x["датаОкончания"]) for x in lessons})
-    return render_card(group_name, date, card_blocks(lessons), slots)
+    return render_card(group_name, date, card_blocks(lessons), slots, card_theme(date, seasonal))
 
 
 def week_card(snapshot: dict[str, dict], monday: str, group_name: str,
-              highlights: dict | None = None) -> bytes:
+              highlights: dict | None = None, seasonal: bool = True) -> bytes:
     from card import render_week_card
 
     days = []
@@ -366,7 +389,35 @@ def week_card(snapshot: dict[str, dict], monday: str, group_name: str,
                                "place": old_item.get("аудитория", ""), "type": "Занятие"})
             blocks.sort(key=lambda block: (block["start"], 0 if block.get("removed") else 1))
         days.append({"date": date, "blocks": blocks, "slots": slots})
-    return render_week_card(group_name, monday, days)
+    return render_week_card(group_name, monday, days, card_theme(monday, seasonal))
+
+
+def horizontal_week_card(snapshot: dict[str, dict], monday: str, group_name: str,
+                         highlights: dict | None = None, seasonal: bool = True) -> bytes:
+    from horizontal_card import render_horizontal_week_card
+
+    first_day = datetime.fromisoformat(monday).date()
+    changed = (highlights or {}).get("changed") or {}
+    entries = []
+    for item in snapshot.values():
+        date = lesson_date(item)
+        if not monday <= date <= (first_day + timedelta(days=6)).isoformat():
+            continue
+        subject, kind = subject_and_type(item)
+        entries.append({"date": date, "start": item["датаНачала"][11:16],
+                        "end": item["датаОкончания"][11:16], "subject": subject,
+                        "type": kind, "teacher": item.get("преподаватель", ""),
+                        "place": item.get("аудитория", ""), "change": changed.get(item["код"], "")})
+    for item in (highlights or {}).get("removed") or []:
+        date = lesson_date(item)
+        if monday <= date <= (first_day + timedelta(days=6)).isoformat():
+            subject, kind = subject_and_type(item)
+            entries.append({"date": date, "start": item["датаНачала"][11:16],
+                            "end": item["датаОкончания"][11:16], "subject": subject,
+                            "type": kind, "teacher": item.get("преподаватель", ""),
+                            "place": item.get("аудитория", ""), "change": "УДАЛЕНО", "removed": True})
+    return render_horizontal_week_card(group_name, monday, entries, PAIR_SLOTS,
+                                       card_theme(monday, seasonal))
 
 
 def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str) -> dict[str, dict]:
@@ -557,8 +608,13 @@ class Bot:
         self.group_name = os.getenv("GROUP_NAME", "ВКБ51")
         self.group_id = int(os.getenv("GROUP_ID", "72244"))
         self.daily_time = os.getenv("DAILY_TIME", "08:00")
-        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", self.daily_time):
+        if not valid_time(self.daily_time):
             raise RuntimeError("DAILY_TIME должен быть в формате ЧЧ:ММ")
+        self.week_layout = os.getenv("WEEK_LAYOUT", "horizontal").strip().lower()
+        if self.week_layout not in ("horizontal", "vertical"):
+            raise RuntimeError("WEEK_LAYOUT должен быть horizontal или vertical")
+        self.seasonal_theme = env_bool("SEASONAL_THEME", True)
+        self.allow_multiple_users = env_bool("ALLOW_MULTIPLE_USERS", True)
         self.interval = max(60, int(os.getenv("CHECK_INTERVAL_SECONDS", "300")))
         self.telegram_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.vk_token = os.getenv("VK_COMMUNITY_TOKEN", "")
@@ -577,7 +633,9 @@ class Bot:
             self.state["telegram_chat_id"] = new_chat_id
         if self.telegram_token and self.pair_code == "замените-на-свой-секретный-код":
             raise RuntimeError("Замените пример TELEGRAM_PAIR_CODE в .env на свой код")
-        if self.telegram_token and not self.state.get("telegram_chat_id") and not self.pair_code:
+        has_saved_subscriber = any(item.get("channel") == "telegram"
+                                   for item in self.state.get("profiles", {}).values())
+        if self.telegram_token and not self.state.get("telegram_chat_id") and not has_saved_subscriber and not self.pair_code:
             raise RuntimeError("Укажите TELEGRAM_CHAT_ID или TELEGRAM_PAIR_CODE")
         if self.vk_token and not self.vk_peer_id:
             raise RuntimeError("Для VK_COMMUNITY_TOKEN нужен VK_PEER_ID")
@@ -875,7 +933,6 @@ class Bot:
             if not response.get("ok"):
                 raise RuntimeError(response.get("description"))
             for update in response.get("result", []):
-                self.state["telegram_offset"] = update["update_id"] + 1
                 callback = update.get("callback_query")
                 if callback:
                     callback_message = callback.get("message") or {}
@@ -883,6 +940,8 @@ class Bot:
                     chat_id = callback_chat.get("id")
                     if callback_chat.get("type") != "private" or chat_id != self.state.get("telegram_chat_id"):
                         self.answer_callback(callback["id"], "Недоступно")
+                        self.state["telegram_offset"] = update["update_id"] + 1
+                        save_state(self.state_file, self.state)
                         continue
                     action = str(callback.get("data") or "")
                     if action.startswith("changes:"):
@@ -896,6 +955,7 @@ class Bot:
                                                 callback_message.get("message_id"))
                     else:
                         self.answer_callback(callback["id"], "Кнопка устарела")
+                    self.state["telegram_offset"] = update["update_id"] + 1
                     save_state(self.state_file, self.state)
                     continue
                 message = update.get("message") or {}
@@ -903,6 +963,8 @@ class Bot:
                 chat_id = chat.get("id")
                 command = (message.get("text") or "").strip()
                 if chat.get("type") != "private" or not chat_id:
+                    self.state["telegram_offset"] = update["update_id"] + 1
+                    save_state(self.state_file, self.state)
                     continue
                 pieces = command.split(maxsplit=1)
                 verb = pieces[0].split("@", 1)[0].lower() if pieces else ""
@@ -1025,6 +1087,558 @@ class Bot:
         self.drain(today)
 
 
+class MultiBot(Bot):
+    """Несколько подписчиков с личной группой, временем и оформлением."""
+
+    def __init__(self, root: Path):
+        super().__init__(root)
+        self.group_id = int(os.getenv("GROUP_ID", "72244"))
+        self.needs_refresh = False
+        profiles = self.state.setdefault("profiles", {})
+        if not self.state.get("profiles_migrated"):
+            chat_id = self.state.get("telegram_chat_id")
+            if self.telegram_token and chat_id:
+                key = self.profile_key(int(chat_id))
+                profiles.setdefault(key, self.new_profile("telegram", int(chat_id), legacy=True))
+            if self.vk_token:
+                profiles.setdefault("vk", self.new_profile("vk", legacy=True))
+            self.state["profiles_migrated"] = True
+            save_state(self.state_file, self.state)
+        if self.vk_token and "vk" not in profiles:
+            profiles["vk"] = self.new_profile("vk", legacy=self.state.get("snapshot") is not None)
+            save_state(self.state_file, self.state)
+        elif self.vk_token:
+            vk = profiles["vk"]
+            if compact_name(vk["group_name"]) != compact_name(self.group_name):
+                vk.update({"group_name": self.group_name, "group_id": self.group_id,
+                           "snapshot": None, "pending": [], "cards": {},
+                           "daily_queued": "", "weekly_queued": "", "group_checked_on": ""})
+            vk.update({"daily_time": self.daily_time, "week_layout": self.week_layout,
+                       "seasonal_theme": self.seasonal_theme})
+            save_state(self.state_file, self.state)
+        chat_id = self.state.get("telegram_chat_id")
+        if self.telegram_token and chat_id and self.profile_key(int(chat_id)) not in profiles:
+            profiles[self.profile_key(int(chat_id))] = self.new_profile(
+                "telegram", int(chat_id), legacy=self.state.get("snapshot") is not None)
+            save_state(self.state_file, self.state)
+
+    @staticmethod
+    def profile_key(chat_id: int) -> str:
+        return f"telegram:{chat_id}"
+
+    def new_profile(self, channel: str, chat_id: int | None = None, legacy: bool = False) -> dict:
+        old = self.state
+        return {
+            "channel": channel, "chat_id": chat_id,
+            "group_name": self.group_name,
+            "group_id": old.get("group_id", self.group_id) if legacy else self.group_id,
+            "daily_time": self.daily_time, "week_layout": self.week_layout,
+            "seasonal_theme": self.seasonal_theme,
+            "snapshot": old.get("snapshot") if legacy else None,
+            "pending": list(old.get("pending", {}).get(channel, [])) if legacy else [],
+            "daily_queued": old.get("daily_queued", {}).get(channel, "") if legacy else "",
+            "weekly_queued": old.get("weekly_queued", {}).get(channel, "") if legacy else "",
+            "cards": dict(old.get("cards", {}).get(channel, {})) if legacy else {},
+            "card_tracking_ready": old.get("card_tracking_ready", True) if legacy else True,
+            "group_checked_on": old.get("group_checked_on", "") if legacy else "",
+            "week_cursor": old.get("telegram_week_cursor", "") if legacy and channel == "telegram" else "",
+            "keyboard_version": old.get("telegram_keyboard_version", 0) if legacy and channel == "telegram" else 0,
+            "change_batches": dict(old.get("change_batches", {})) if legacy and channel == "telegram" else {},
+            "awaiting": "", "welcome_card_pending": False,
+        }
+
+    def profile_for_chat(self, chat_id: int | None) -> dict | None:
+        return self.state["profiles"].get(self.profile_key(chat_id)) if chat_id else None
+
+    def active_profiles(self) -> list[dict]:
+        return [profile for profile in self.state["profiles"].values()
+                if (profile["channel"] == "telegram" and self.telegram_token)
+                or (profile["channel"] == "vk" and self.vk_token)]
+
+    def send_telegram_chat(self, chat_id: int, message: str, inline_markup: dict | None = None) -> None:
+        params = {"chat_id": chat_id, "text": message}
+        profile = self.profile_for_chat(chat_id)
+        if inline_markup is not None:
+            params["reply_markup"] = json.dumps(inline_markup, ensure_ascii=False)
+        elif profile:
+            params["reply_markup"] = json.dumps(telegram_keyboard(), ensure_ascii=False)
+        response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/sendMessage",
+                                params, method="POST")
+        if not response.get("ok"):
+            raise RuntimeError(f"Telegram: {response.get('description')}")
+        if profile and inline_markup is None:
+            profile["keyboard_version"] = 2
+
+    def send_profile_message(self, profile: dict, message: str,
+                             inline_markup: dict | None = None) -> None:
+        if profile["channel"] == "telegram":
+            self.send_telegram_chat(profile["chat_id"], message, inline_markup)
+        else:
+            super().send("vk", message)
+
+    def render_profile_card(self, profile: dict, view: str, date: str,
+                            highlights: dict | None = None, layout_override: str | None = None) -> bytes:
+        snapshot = profile.get("snapshot") or {}
+        group_name = profile["group_name"]
+        seasonal = profile["seasonal_theme"]
+        if view == "day":
+            return schedule_card(snapshot, date, group_name, seasonal)
+        layout = layout_override or profile["week_layout"]
+        if layout == "horizontal":
+            return horizontal_week_card(snapshot, date, group_name, highlights, seasonal)
+        return week_card(snapshot, date, group_name, highlights, seasonal)
+
+    def send_profile_card(self, profile: dict, view: str, date: str,
+                          replace: bool = False, layout_override: str | None = None,
+                          track: bool = True) -> None:
+        if profile.get("snapshot") is None:
+            self.send_profile_message(profile, "Расписание пока не загружено.")
+            return
+        caption = (f"Расписание {profile['group_name']} на {datetime.fromisoformat(date):%d.%m.%Y}"
+                   if view == "day" else
+                   f"Расписание {profile['group_name']} на неделю с {datetime.fromisoformat(date):%d.%m.%Y}")
+        if layout_override:
+            caption = "Пример · " + caption
+        key = f"{view}:{date}"
+        remembered = profile["cards"].get(key) or []
+        ids = remembered if isinstance(remembered, list) else [remembered]
+        try:
+            png = self.render_profile_card(profile, view, date, layout_override=layout_override)
+            if replace and ids:
+                updated = []
+                for message_id in ids:
+                    try:
+                        if profile["channel"] == "telegram":
+                            self.edit_telegram_card(profile["chat_id"], message_id, png, caption)
+                        else:
+                            self.edit_vk_card(message_id, png, caption)
+                        updated.append(message_id)
+                    except Exception as exc:
+                        LOG.warning("Не удалось обновить карточку %s (ID %s): %s", key, message_id, exc)
+                if len(updated) == len(ids):
+                    return
+                ids = updated
+            message_id = (self.send_telegram_card(profile["chat_id"], png, caption)
+                          if profile["channel"] == "telegram" else self.send_vk_card(png, caption))
+            if profile["channel"] == "telegram":
+                profile["keyboard_version"] = 2
+            if track and message_id is not None:
+                ids = (ids + [message_id])[-20:]
+                profile["cards"][key] = ids
+        except Exception as exc:
+            LOG.warning("Не удалось отправить карточку %s: %s", key, exc)
+            fallback = (day_message(profile["snapshot"], date, profile["group_name"])
+                        if view == "day" else week_message(profile["snapshot"], date, profile["group_name"]))
+            for part in split_message(fallback):
+                self.send_profile_message(profile, part)
+
+    def ensure_telegram_keyboards(self) -> None:
+        for profile in self.active_profiles():
+            if profile["channel"] == "telegram" and profile.get("keyboard_version") != 2:
+                try:
+                    self.send_telegram_chat(profile["chat_id"],
+                                            "Кнопки расписания обновлены. Откройте «Настройки», чтобы выбрать группу и оформление.")
+                except Exception as exc:
+                    LOG.warning("Не удалось показать кнопки чату %s: %s", profile["chat_id"], exc)
+
+    def settings_view(self, profile: dict) -> tuple[str, dict]:
+        layout = "горизонтальное" if profile["week_layout"] == "horizontal" else "вертикальное"
+        seasonal = "включено" if profile["seasonal_theme"] else "выключено"
+        message = (f"⚙️ Настройки расписания\n\n"
+                   f"Группа: {profile['group_name']}\n"
+                   f"Отправка: {profile['daily_time']} по Москве\n"
+                   f"Неделя: {layout}\n"
+                   f"Сезонное оформление: {seasonal}\n\n"
+                   "Осенняя палитра действует для дат сентября–ноября. "
+                   "Изменение времени начнёт действовать со следующей ежедневной отправки.")
+        markup = {"inline_keyboard": [
+            [{"text": f"🎓 Группа · {profile['group_name']}", "callback_data": "settings:group"}],
+            [{"text": f"⏰ Время · {profile['daily_time']}", "callback_data": "settings:time"}],
+            [{"text": f"🗓 Неделя · {layout}",
+              "callback_data": "settings:layout:" + ("vertical" if profile["week_layout"] == "horizontal" else "horizontal")}],
+            [{"text": f"🍂 Сезонная тема · {seasonal}",
+              "callback_data": "settings:season:" + ("off" if profile["seasonal_theme"] else "on")}],
+            [{"text": "Пример ↔️", "callback_data": "settings:example:horizontal"},
+             {"text": "Пример ↕️", "callback_data": "settings:example:vertical"}],
+        ]}
+        return message, markup
+
+    def show_settings(self, profile: dict, message_id: int | None = None) -> None:
+        message, markup = self.settings_view(profile)
+        method = "editMessageText" if message_id else "sendMessage"
+        params = {"chat_id": profile["chat_id"], "text": message,
+                  "reply_markup": json.dumps(markup, ensure_ascii=False)}
+        if message_id:
+            params["message_id"] = message_id
+        response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/{method}",
+                                params, method="POST")
+        if not response.get("ok") and "message is not modified" not in str(response.get("description", "")):
+            if message_id:
+                return self.show_settings(profile)
+            raise RuntimeError(f"Telegram: {response.get('description')}")
+
+    def send_profile_text_view(self, profile: dict, view: str, date: str,
+                               message_id: int | None = None) -> None:
+        snapshot = profile.get("snapshot")
+        if snapshot is None:
+            self.send_profile_message(profile, "Расписание пока не загружено.")
+            return
+        message, markup = (text_week_view(snapshot, date, profile["group_name"]) if view == "week"
+                           else text_day_view(snapshot, date, profile["group_name"]))
+        method = "editMessageText" if message_id else "sendMessage"
+        params = {"chat_id": profile["chat_id"], "text": message, "parse_mode": "HTML",
+                  "reply_markup": json.dumps(markup, ensure_ascii=False)}
+        if message_id:
+            params["message_id"] = message_id
+        response = request_json(f"https://api.telegram.org/bot{self.telegram_token}/{method}",
+                                params, method="POST")
+        if not response.get("ok") and "message is not modified" not in str(response.get("description", "")):
+            raise RuntimeError(f"Telegram: {response.get('description')}")
+
+    def navigate_profile_week(self, profile: dict, today: str, step: int) -> None:
+        snapshot = profile.get("snapshot")
+        if snapshot is None:
+            self.send_profile_message(profile, "Расписание пока не загружено.")
+            return
+        anchor = profile.get("week_cursor") or week_start(today)
+        try:
+            anchor = week_start(anchor)
+        except ValueError:
+            anchor = week_start(today)
+        target = (datetime.fromisoformat(anchor) + timedelta(days=7 * step)).date().isoformat()
+        if snapshot:
+            dates = [lesson_date(item) for item in snapshot.values()]
+            if target < week_start(min(dates)):
+                self.send_profile_message(profile, "Более ранних недель нет в расписании ДГТУ.")
+                return
+            if target > week_start(max(dates)):
+                self.send_profile_message(profile, "Более поздних недель пока нет в расписании ДГТУ.")
+                return
+        profile["week_cursor"] = target
+        self.send_profile_card(profile, "week", target)
+
+    def show_profile_change_batch(self, profile: dict, batch_id: str) -> None:
+        batch = profile["change_batches"].get(batch_id)
+        if not batch:
+            self.send_profile_message(profile, "Это уведомление уже устарело. Откройте актуальную неделю кнопками ниже.")
+            return
+        for monday, marker in sorted(batch["weeks"].items()):
+            caption = f"Изменения {profile['group_name']} · неделя с {datetime.fromisoformat(monday):%d.%m.%Y}"
+            try:
+                if profile["week_layout"] == "horizontal":
+                    png = horizontal_week_card(batch["snapshot"], monday, profile["group_name"],
+                                               marker, profile["seasonal_theme"])
+                else:
+                    png = week_card(batch["snapshot"], monday, profile["group_name"],
+                                    marker, profile["seasonal_theme"])
+                self.send_telegram_card(profile["chat_id"], png, caption)
+                profile["keyboard_version"] = 2
+            except Exception as exc:
+                LOG.warning("Не удалось показать изменения за %s: %s", monday, exc)
+                for part in split_message(week_message(batch["snapshot"], monday, profile["group_name"])):
+                    self.send_profile_message(profile, part)
+
+    def apply_user_input(self, profile: dict, value: str, today: str) -> None:
+        awaiting = profile.get("awaiting")
+        if awaiting == "time":
+            if not valid_time(value):
+                self.send_profile_message(profile, "Введите время в формате ЧЧ:ММ, например 08:00 или 19:30.")
+                return
+            profile["daily_time"] = value
+            profile["awaiting"] = ""
+            self.send_profile_message(profile, f"Время отправки установлено: {value} по Москве.")
+            self.show_settings(profile)
+            return
+        if awaiting == "group":
+            if not 1 <= len(value) <= 40:
+                self.send_profile_message(profile, "Введите короткое название группы, например ВКБ51.")
+                return
+            try:
+                group_id = find_group_id(value)
+                snapshot = fetch_schedule(group_id, value)
+            except Exception as exc:
+                LOG.warning("Не удалось выбрать группу %s: %s", value, exc)
+                self.send_profile_message(profile, "Группа не найдена или ДГТУ сейчас недоступен. Проверьте название и попробуйте ещё раз.")
+                return
+            profile.update({"group_name": value, "group_id": group_id, "snapshot": snapshot,
+                            "group_checked_on": today, "pending": [], "cards": {},
+                            "daily_queued": today, "weekly_queued": "", "week_cursor": "",
+                            "change_batches": {}, "awaiting": ""})
+            self.send_profile_message(profile, f"Теперь показываю расписание группы {value}.")
+            self.send_profile_card(profile, "day", today)
+            self.show_settings(profile)
+
+    def handle_profile_callback(self, profile: dict, callback: dict) -> None:
+        action = str(callback.get("data") or "")
+        message_id = (callback.get("message") or {}).get("message_id")
+        callback_id = callback["id"]
+        if action.startswith("changes:"):
+            self.answer_callback(callback_id)
+            self.show_profile_change_batch(profile, action.split(":", 1)[1])
+        elif action.startswith(("tw:", "td:")):
+            self.answer_callback(callback_id)
+            view, date = action.split(":", 1)
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                self.send_profile_text_view(profile, "week" if view == "tw" else "day",
+                                            date, message_id)
+        elif action in ("settings:layout:horizontal", "settings:layout:vertical"):
+            self.answer_callback(callback_id)
+            profile["week_layout"] = action.rsplit(":", 1)[1]
+            self.show_settings(profile, message_id)
+        elif action in ("settings:season:on", "settings:season:off"):
+            self.answer_callback(callback_id)
+            profile["seasonal_theme"] = action.endswith(":on")
+            self.show_settings(profile, message_id)
+        elif action in ("settings:group", "settings:time"):
+            self.answer_callback(callback_id)
+            profile["awaiting"] = action.split(":", 1)[1]
+            prompt = ("Напишите название группы так, как на сайте ДГТУ, например ВКБ51."
+                      if profile["awaiting"] == "group" else
+                      "Напишите время отправки по Москве в формате ЧЧ:ММ, например 08:00.")
+            self.send_profile_message(profile, prompt)
+        elif action.startswith("settings:example:"):
+            self.answer_callback(callback_id)
+            layout = action.rsplit(":", 1)[1]
+            if layout in ("horizontal", "vertical"):
+                today = datetime.now(MOSCOW).date().isoformat()
+                self.send_profile_card(profile, "week", week_start(today),
+                                       layout_override=layout, track=False)
+        else:
+            self.answer_callback(callback_id, "Кнопка устарела")
+
+    def telegram_commands(self, today: str) -> bool:
+        if not self.telegram_token:
+            return False
+        try:
+            response = request_json(
+                f"https://api.telegram.org/bot{self.telegram_token}/getUpdates",
+                {"offset": self.state["telegram_offset"], "timeout": 2,
+                 "allowed_updates": '["message","callback_query"]'}, timeout=6)
+            if not response.get("ok"):
+                raise RuntimeError(response.get("description"))
+            for update in response.get("result", []):
+                callback = update.get("callback_query")
+                if callback:
+                    chat = ((callback.get("message") or {}).get("chat") or {})
+                    profile = self.profile_for_chat(chat.get("id"))
+                    if chat.get("type") != "private" or not profile:
+                        self.answer_callback(callback["id"], "Недоступно")
+                    else:
+                        self.handle_profile_callback(profile, callback)
+                    self.state["telegram_offset"] = update["update_id"] + 1
+                    save_state(self.state_file, self.state)
+                    continue
+                message = update.get("message") or {}
+                chat = message.get("chat") or {}
+                chat_id = chat.get("id")
+                if chat.get("type") != "private" or not chat_id:
+                    self.state["telegram_offset"] = update["update_id"] + 1
+                    save_state(self.state_file, self.state)
+                    continue
+                command = (message.get("text") or "").strip()
+                pieces = command.split(maxsplit=1)
+                verb = pieces[0].split("@", 1)[0].lower() if pieces else ""
+                argument = pieces[1].strip() if len(pieces) > 1 else ""
+                profile = self.profile_for_chat(chat_id)
+                if not profile:
+                    if verb == "/start" and self.pair_code and secrets.compare_digest(argument, self.pair_code):
+                        has_user = any(item["channel"] == "telegram"
+                                       for item in self.state["profiles"].values())
+                        if has_user and not self.allow_multiple_users:
+                            self.send_telegram_chat(chat_id, "Бот уже привязан к другому чату.")
+                        else:
+                            profile = self.new_profile("telegram", chat_id)
+                            profile["welcome_card_pending"] = True
+                            self.state["profiles"][self.profile_key(chat_id)] = profile
+                            save_state(self.state_file, self.state)
+                            self.needs_refresh = True
+                            self.send_profile_message(profile, f"Готово! Вы подписаны на расписание {profile['group_name']}.")
+                            self.show_settings(profile)
+                    elif verb == "/start":
+                        self.send_telegram_chat(chat_id, "Код не подошёл. Отправьте /start ПРОБЕЛ ВАШ_КОД из файла .env.")
+                    self.state["telegram_offset"] = update["update_id"] + 1
+                    save_state(self.state_file, self.state)
+                    continue
+                known_buttons = {BUTTON_TODAY, BUTTON_TOMORROW, BUTTON_PREVIOUS_WEEK,
+                                 BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_TEXT, BUTTON_SETTINGS}
+                if profile.get("awaiting") and command and not command.startswith("/") and command not in known_buttons:
+                    self.apply_user_input(profile, command, today)
+                elif verb == "/today" or command == BUTTON_TODAY:
+                    self.send_profile_card(profile, "day", today)
+                elif verb == "/tomorrow" or command == BUTTON_TOMORROW:
+                    next_day = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
+                    self.send_profile_card(profile, "day", next_day)
+                elif verb == "/week" or command == BUTTON_CURRENT_WEEK:
+                    monday = week_start(today)
+                    profile["week_cursor"] = monday
+                    self.send_profile_card(profile, "week", monday)
+                elif verb == "/nextweek":
+                    profile["week_cursor"] = week_start(today)
+                    self.navigate_profile_week(profile, today, 1)
+                elif command == BUTTON_PREVIOUS_WEEK:
+                    self.navigate_profile_week(profile, today, -1)
+                elif command == BUTTON_NEXT_WEEK:
+                    self.navigate_profile_week(profile, today, 1)
+                elif verb in ("/text", "/week_text") or command == BUTTON_TEXT:
+                    self.send_profile_text_view(profile, "week", week_start(today))
+                elif verb in ("/today_text", "/tomorrow_text"):
+                    date = (today if verb == "/today_text" else
+                            (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat())
+                    self.send_profile_text_view(profile, "day", date)
+                elif verb == "/settings" or command == BUTTON_SETTINGS:
+                    profile["awaiting"] = ""
+                    self.show_settings(profile)
+                elif verb in ("/start", "/help"):
+                    self.send_profile_message(profile, "Выберите день или неделю кнопками ниже. ⚙️ Настройки меняют группу, время и оформление.")
+                self.state["telegram_offset"] = update["update_id"] + 1
+                save_state(self.state_file, self.state)
+            return True
+        except Exception as exc:
+            LOG.error("Ошибка обработки команд Telegram: %s", exc)
+            return False
+
+
+    @staticmethod
+    def queue_profile(profile: dict, message: str, kind: str = "change",
+                      batch_id: str = "") -> None:
+        parts = split_message(message)
+        for index, part in enumerate(parts):
+            profile["pending"].append({"text": part, "kind": kind,
+                                       "batch_id": batch_id if index == len(parts) - 1 else ""})
+
+    @staticmethod
+    def queue_profile_card(profile: dict, view: str, date: str, kind: str) -> None:
+        if kind == "refresh" and any(item.get("kind") == "refresh" and item.get("view") == view
+                                     and item.get("date") == date for item in profile["pending"]):
+            return
+        profile["pending"].append({"kind": kind, "format": "card", "view": view, "date": date})
+
+    def drain(self, today: str) -> None:
+        for profile in self.active_profiles():
+            pending = profile["pending"]
+            while pending:
+                item = pending[0]
+                view = item.get("view")
+                date = item.get("date", "")
+                expired = ((item["kind"] in ("daily", "refresh") and view == "day" and date < today)
+                           or (item["kind"] in ("weekly", "refresh") and view == "week"
+                               and (datetime.fromisoformat(date) + timedelta(days=6)).date().isoformat() < today))
+                if expired:
+                    pending.pop(0)
+                    save_state(self.state_file, self.state)
+                    continue
+                try:
+                    if item.get("format") == "card":
+                        self.send_profile_card(profile, view or "day", date, replace=item["kind"] == "refresh")
+                    elif profile["channel"] == "telegram" and item.get("batch_id"):
+                        markup = {"inline_keyboard": [[{"text": "🗓 Показать изменения",
+                                                       "callback_data": f"changes:{item['batch_id']}"}]]}
+                        self.send_profile_message(profile, item["text"], markup)
+                    else:
+                        self.send_profile_message(profile, item["text"])
+                except Exception as exc:
+                    LOG.error("Не удалось отправить сообщение подписчику %s: %s",
+                              profile.get("chat_id") or profile["channel"], exc)
+                    break
+                pending.pop(0)
+                save_state(self.state_file, self.state)
+
+    def process_profile_snapshot(self, profile: dict, snapshot: dict, now: datetime) -> None:
+        today = now.date().isoformat()
+        old = profile.get("snapshot")
+        if old and not snapshot and any(lesson_date(item) >= today for item in old.values()):
+            raise RuntimeError("API неожиданно вернул пустое расписание; старые данные сохранены")
+        if old is not None:
+            current_old = {code: item for code, item in old.items() if lesson_date(item) == today}
+            current_new = {code: item for code, item in snapshot.items() if lesson_date(item) == today}
+            future_old = {code: item for code, item in old.items() if lesson_date(item) > today}
+            future_new = {code: item for code, item in snapshot.items() if lesson_date(item) > today}
+            current_message = changes_message(current_old, current_new, today, profile["group_name"])
+            future_message = changes_message(future_old, future_new, today, profile["group_name"])
+            if current_message or future_message:
+                if current_message:
+                    self.queue_profile(profile, "Сегодня: " + current_message)
+                if future_message:
+                    batch_id = ""
+                    weeks = future_change_weeks(old, snapshot, today)
+                    if weeks and profile["channel"] == "telegram":
+                        batch_id = secrets.token_hex(4)
+                        batch_snapshot = {code: item for code, item in snapshot.items()
+                                          if week_start(lesson_date(item)) in weeks}
+                        batches = profile["change_batches"]
+                        batches[batch_id] = {"snapshot": batch_snapshot, "weeks": weeks,
+                                             "created": today}
+                        while len(batches) > 20:
+                            batches.pop(next(iter(batches)))
+                    self.queue_profile(profile, "Будущие дни: " + future_message,
+                                       "future_change", batch_id)
+                changed_dates = set()
+                for code in set(old) | set(snapshot):
+                    if old.get(code) != snapshot.get(code):
+                        changed_dates.update(lesson_date(item) for item in (old.get(code), snapshot.get(code)) if item)
+                for date in sorted(day for day in changed_dates if day >= today):
+                    if f"day:{date}" in profile["cards"]:
+                        self.queue_profile_card(profile, "day", date, "refresh")
+                    monday = week_start(date)
+                    if f"week:{monday}" in profile["cards"]:
+                        self.queue_profile_card(profile, "week", monday, "refresh")
+        profile["snapshot"] = snapshot
+
+    def queue_due(self, now: datetime) -> bool:
+        today = now.date().isoformat()
+        changed = False
+        for profile in self.active_profiles():
+            if profile.get("snapshot") is None or now.strftime("%H:%M") < profile["daily_time"]:
+                continue
+            needs_migration = (not profile.get("card_tracking_ready", True)
+                               and profile.get("daily_queued") == today
+                               and not any(item.get("kind") == "daily" and item.get("format") == "card"
+                                           and item.get("date") == today for item in profile["pending"]))
+            if profile.get("daily_queued") != today or needs_migration:
+                self.queue_profile_card(profile, "day", today, "daily")
+                profile["daily_queued"] = today
+                changed = True
+            if now.weekday() == 0 and profile.get("weekly_queued") != today:
+                self.queue_profile_card(profile, "week", today, "weekly")
+                profile["weekly_queued"] = today
+                changed = True
+            profile["card_tracking_ready"] = True
+        return changed
+
+    def cycle(self) -> None:
+        now = datetime.now(MOSCOW)
+        today = now.date().isoformat()
+        self.telegram_commands(today)
+        cache: dict[str, tuple[int, dict]] = {}
+        for profile in self.active_profiles():
+            group_key = compact_name(profile["group_name"])
+            try:
+                if group_key not in cache:
+                    group_id = int(profile["group_id"])
+                    if profile.get("group_checked_on") != today:
+                        try:
+                            group_id = find_group_id(profile["group_name"])
+                        except Exception as exc:
+                            LOG.warning("Поиск группы %s недоступен, использую ID %s: %s",
+                                        profile["group_name"], group_id, exc)
+                    snapshot = fetch_schedule(group_id, profile["group_name"])
+                    cache[group_key] = (group_id, snapshot)
+                group_id, snapshot = cache[group_key]
+                profile["group_id"] = group_id
+                profile["group_checked_on"] = today
+                self.process_profile_snapshot(profile, snapshot, now)
+                if profile.get("welcome_card_pending"):
+                    self.queue_profile_card(profile, "day", today, "daily")
+                    profile["daily_queued"] = today
+                    profile["welcome_card_pending"] = False
+            except Exception as exc:
+                LOG.error("Не удалось обновить группу %s: %s", profile["group_name"], exc)
+        self.queue_due(now)
+        save_state(self.state_file, self.state)
+        self.ensure_telegram_keyboards()
+        self.drain(today)
+
+
 def stop(_signum, _frame) -> None:
     global STOP
     STOP = True
@@ -1053,8 +1667,15 @@ def doctor(root: Path) -> int:
     state_path = root / os.getenv("STATE_FILE", "data/state.json")
     try:
         state = load_state(state_path)
-        print(f"Чат Telegram: {'привязан' if state.get('telegram_chat_id') else 'ещё не привязан'}")
-        print(f"Снимок расписания: {'есть' if state.get('snapshot') is not None else 'ещё нет'}")
+        profiles = state.get("profiles") or {}
+        telegram_count = sum(item.get("channel") == "telegram" for item in profiles.values())
+        snapshot_count = sum(item.get("snapshot") is not None for item in profiles.values())
+        if profiles:
+            print(f"Telegram-подписчиков: {telegram_count}")
+            print(f"Загруженных расписаний: {snapshot_count} из {len(profiles)}")
+        else:
+            print(f"Чат Telegram: {'привязан' if state.get('telegram_chat_id') else 'ещё не привязан'}")
+            print(f"Снимок расписания: {'есть' if state.get('snapshot') is not None else 'ещё нет'}")
     except Exception as exc:
         print(f"Файл состояния: ошибка — {exc}")
     if token:
@@ -1081,10 +1702,16 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if "--doctor" in sys.argv:
         return doctor(Path(__file__).resolve().parent)
-    if any(option in sys.argv for option in ("--preview", "--preview-card", "--preview-week")):
+    if any(option in sys.argv for option in
+           ("--preview", "--preview-card", "--preview-week", "--preview-horizontal", "--preview-vertical")):
         root = Path(__file__).resolve().parent
         load_env(root / ".env")
         group_name = os.getenv("GROUP_NAME", "ВКБ51")
+        layout = os.getenv("WEEK_LAYOUT", "horizontal").strip().lower()
+        if layout not in ("horizontal", "vertical"):
+            LOG.error("WEEK_LAYOUT должен быть horizontal или vertical")
+            return 2
+        seasonal = env_bool("SEASONAL_THEME", True)
         try:
             group_id = find_group_id(group_name)
             snapshot = fetch_schedule(group_id, group_name)
@@ -1095,12 +1722,21 @@ def main() -> int:
             if "--preview-card" in sys.argv:
                 preview_file = root / "data" / "preview.png"
                 preview_file.parent.mkdir(parents=True, exist_ok=True)
-                preview_file.write_bytes(schedule_card(snapshot, today, group_name))
+                preview_file.write_bytes(schedule_card(snapshot, today, group_name, seasonal))
                 print(f"Карточка сохранена: {preview_file}")
-            elif "--preview-week" in sys.argv:
-                preview_file = root / "data" / "preview_week.png"
+            elif any(option in sys.argv for option in ("--preview-week", "--preview-horizontal", "--preview-vertical")):
+                if "--preview-horizontal" in sys.argv:
+                    layout = "horizontal"
+                elif "--preview-vertical" in sys.argv:
+                    layout = "vertical"
+                name = ("preview_week.png" if "--preview-week" in sys.argv else
+                        "preview_horizontal.png" if layout == "horizontal" else "preview_vertical.png")
+                preview_file = root / "data" / name
                 preview_file.parent.mkdir(parents=True, exist_ok=True)
-                preview_file.write_bytes(week_card(snapshot, week_start(today), group_name))
+                png = (horizontal_week_card(snapshot, week_start(today), group_name, seasonal=seasonal)
+                       if layout == "horizontal" else
+                       week_card(snapshot, week_start(today), group_name, seasonal=seasonal))
+                preview_file.write_bytes(png)
                 print(f"Недельная карточка сохранена: {preview_file}")
             else:
                 print(day_message(snapshot, today, group_name))
@@ -1112,20 +1748,27 @@ def main() -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, stop)
     try:
-        bot = Bot(Path(__file__).resolve().parent)
+        bot = MultiBot(Path(__file__).resolve().parent)
     except Exception as exc:
         LOG.error("Ошибка настройки: %s", exc)
         return 2
-    LOG.info("Бот запущен для группы %s, проверка каждые %d секунд", bot.group_name, bot.interval)
+    LOG.info("Бот запущен: %d подписчиков, проверка каждые %d секунд",
+             len(bot.state["profiles"]), bot.interval)
     while not STOP:
         bot.cycle()
         deadline = time.monotonic() + bot.interval
         while not STOP and time.monotonic() < deadline:
             poll_ok = True
+            now = datetime.now(MOSCOW)
+            today = now.date().isoformat()
             if bot.telegram_token:
-                today = datetime.now(MOSCOW).date().isoformat()
                 poll_ok = bot.telegram_commands(today)
-                bot.drain(today)
+            if bot.needs_refresh:
+                bot.needs_refresh = False
+                break
+            if bot.queue_due(now):
+                save_state(bot.state_file, bot.state)
+            bot.drain(today)
             pause = (0.2 if poll_ok else 2) if bot.telegram_token else 1
             time.sleep(min(pause, max(0, deadline - time.monotonic())))
     LOG.info("Бот остановлен")

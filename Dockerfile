@@ -5,4 +5,5 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY bot.py /app/bot.py
 COPY card.py /app/card.py
+COPY horizontal_card.py /app/horizontal_card.py
 CMD ["python", "-u", "bot.py"]
