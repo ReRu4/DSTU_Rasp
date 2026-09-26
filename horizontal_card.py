@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import io
+import re
 from collections import defaultdict
 from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw
 
-from card import MONTHS, draw_leaf, font, palette, status_kind, text_width, wrap
+from card import (MONTHS, draw_change_badge, draw_leaf, font, palette,
+                  status_kind, text_width, wrap)
 
 
 WIDTH = 2880
@@ -44,6 +46,22 @@ def fitted_lines(draw: ImageDraw.ImageDraw, value: str,
     return face, wrap(draw, value, face, max_width)
 
 
+def fitted_font(draw: ImageDraw.ImageDraw, value: str, sizes: tuple[int, ...],
+                max_width: int):
+    return next((font(size, True) for size in sizes
+                 if text_width(draw, value, font(size, True)) <= max_width),
+                font(sizes[-1], True))
+
+
+def paired(items: list[dict]) -> bool:
+    return len(items) == 2 and not any(item.get("change") or item.get("removed") for item in items)
+
+
+def common_subject(value: str) -> str:
+    return re.sub(r"\s*[,;]?\s*п\s*/\s*г\s*\d+\s*$", "", value,
+                  flags=re.IGNORECASE).rstrip(" ,;·")
+
+
 def draw_lesson(draw: ImageDraw.ImageDraw, x: int, y: int, height: int,
                 item: dict, number: int, total: int, colors: dict) -> None:
     marker = item.get("change", "")
@@ -53,48 +71,98 @@ def draw_lesson(draw: ImageDraw.ImageDraw, x: int, y: int, height: int,
     accent = colors["types"].get(item["type"], colors["accent"])
     fill = "#4A2D29" if kind == "removed" else colors["tints"].get(item["type"], colors["card"])
     x2, y2 = x + DAY_WIDTH, y + height
-    draw.rounded_rectangle((x, y, x2, y2), radius=20, fill=fill,
-                           outline=status_color, width=4 if changed else 1)
+    draw.rounded_rectangle((x, y, x2, y2), radius=20, fill=fill)
     draw.rounded_rectangle((x + 2, y + 18, x + 9, y2 - 18), radius=4, fill=accent)
-    kind = item["type"].upper() + (f" · {number}/{total}" if total > 1 else "")
-    draw.text((x + 24, y + 15), kind, font=font(20, True), fill=accent)
+    kind_label = item["type"].upper() + (f" · {number}/{total}" if total > 1 else "")
+    draw.text((x + 24, y + (52 if changed else 15)), kind_label,
+              font=font(19, True), fill=accent)
     if changed:
-        mark = "АУД. ИЗМЕНЕНА" if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else marker
-        mark_face = font(15, True)
-        mark_width = text_width(draw, mark, mark_face) + 20
-        draw.rounded_rectangle((x2 - mark_width - 14, y + 11, x2 - 14, y + 42),
-                               radius=8, fill=status_color)
-        draw.text((x2 - mark_width - 4, y + 16), mark, font=mark_face, fill="#25151A")
+        draw_change_badge(draw, x2 - 13, y + 11, marker, status_color, 15)
 
-    teacher_y = y2 - 92
+    teacher_y = y2 - 45
+    title_top = y + (82 if changed else 50)
     title_face, title_lines = fitted_lines(draw, item["subject"], DAY_WIDTH - 45,
-                                           teacher_y - (y + 52) - 8)
-    ty = y + 50
-    for line in title_lines:
+                                           teacher_y - title_top - 8)
+    ty = title_top
+    for line in title_lines[:max(1, (teacher_y - title_top - 6) // (title_face.size + 4))]:
         draw.text((x + 24, ty), line, font=title_face, fill=colors["white"])
         ty += title_face.size + 4
 
     teacher = str(item.get("teacher") or "—")
-    draw.rounded_rectangle((x + 18, teacher_y, x2 - 16, teacher_y + 39),
-                           radius=10, fill=colors["teacher"])
-    draw.text((x + 29, teacher_y + 8), "ПРЕП.", font=font(17, True),
-              fill=colors["teacher_label"])
-    teacher_face = next((font(size, True) for size in (24, 22, 20, 18, 16)
-                         if text_width(draw, teacher, font(size, True)) < DAY_WIDTH - 125), font(16, True))
-    draw.text((x2 - 27 - text_width(draw, teacher, teacher_face), teacher_y + 5),
-              teacher, font=teacher_face, fill=colors["white"])
-
     room = str(item.get("place") or "—")
-    room_y = y2 - 48
-    draw.rounded_rectangle((x + 18, room_y, x2 - 16, y2 - 12), radius=10,
-                           fill=colors["room"],
-                           outline=status_color if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else accent,
-                           width=2)
-    room_face = next((font(size, True) for size in (25, 23, 21, 19, 17)
-                      if text_width(draw, room, font(size, True)) < DAY_WIDTH - 104), font(17, True))
-    draw.text((x + 30, room_y + 5), "АУД.", font=font(18, True), fill=colors["muted"])
-    draw.text((x2 - 28 - text_width(draw, room, room_face), room_y + 3),
-              room, font=room_face, fill=colors["white"])
+    room_face = fitted_font(draw, room, (24, 22, 20, 18, 16), DAY_WIDTH - 86)
+    room_width = min(DAY_WIDTH - 40, text_width(draw, room, room_face) + 26)
+    room_left = x2 - 15 - room_width
+    room_changed = marker == "АУДИТОРИЯ ИЗМЕНЕНА"
+    draw.rounded_rectangle((room_left, y2 - 51, x2 - 15, y2 - 12), radius=9,
+                           fill=status_color if room_changed else colors["room"])
+    draw.text((room_left + 13, y2 - 46), room, font=room_face,
+              fill="#25151A" if room_changed else colors["white"])
+    teacher_face = fitted_font(draw, teacher, (20, 18, 16, 14),
+                               max(65, room_left - x - 35))
+    draw.text((x + 20, teacher_y + 1), teacher, font=teacher_face, fill=colors["white"])
+
+
+def draw_parallel(draw: ImageDraw.ImageDraw, x: int, y: int, height: int,
+                  items: list[dict], colors: dict) -> None:
+    """Две записи в одном слоте: каждая сторона сохраняет свои данные."""
+    first = items[0]
+    accent = colors["types"].get(first["type"], colors["accent"])
+    fill = colors["tints"].get(first["type"], colors["card"])
+    x2, y2 = x + DAY_WIDTH, y + height
+    draw.rounded_rectangle((x, y, x2, y2), radius=20, fill=fill)
+    draw.rounded_rectangle((x + 2, y + 18, x + 9, y2 - 18), radius=4, fill=accent)
+    shared = (common_subject(items[0]["subject"]) == common_subject(items[1]["subject"])
+              and items[0]["type"] == items[1]["type"])
+    if shared:
+        draw.text((x + 22, y + 13), first["type"].upper(), font=font(19, True), fill=accent)
+        title_face, title_lines = fitted_lines(draw, common_subject(first["subject"]),
+                                               DAY_WIDTH - 43, 102)
+        for index, line in enumerate(title_lines[:4]):
+            draw.text((x + 22, y + 43 + index * (title_face.size + 3)),
+                      line, font=title_face, fill=colors["white"])
+        divider_y = y + 154
+        draw.line((x + 18, divider_y, x2 - 17, divider_y), fill=accent, width=2)
+    else:
+        divider_y = y + 15
+    middle = x + DAY_WIDTH // 2
+    draw.line((middle, divider_y + 8, middle, y2 - 12), fill=accent, width=2)
+    for index, item in enumerate(items, 1):
+        left = x + 18 if index == 1 else middle + 10
+        right = middle - 8 if index == 1 else x2 - 15
+        subgroup = item.get("subgroup")
+        distinct_subgroups = (items[0].get("subgroup") and items[1].get("subgroup")
+                              and items[0]["subgroup"] != items[1]["subgroup"])
+        label = (f"П/Г {subgroup}" if distinct_subgroups else f"ЗАПИСЬ {index}") if shared else f"{index}. {item['type'].upper()}"
+        draw.text((left, y + (164 if shared else 17)), label,
+                  font=font(16, True), fill=colors["types"].get(item["type"], accent))
+        if not shared:
+            title_face, title_lines = fitted_lines(draw, item["subject"], right - left,
+                                                   height - 125)
+            title_y = y + 47
+            for line in title_lines[:4]:
+                draw.text((left, title_y), line, font=title_face, fill=colors["white"])
+                title_y += title_face.size + 3
+        teacher = str(item.get("teacher") or "—")
+        if shared:
+            teacher_face = font(19, True)
+            teacher_lines = wrap(draw, teacher, teacher_face, right - left)
+            if len(teacher_lines) > 2:
+                teacher_face = font(16, True)
+                teacher_lines = wrap(draw, teacher, teacher_face, right - left)
+            for line_number, text in enumerate(teacher_lines[:2]):
+                draw.text((left, y + 199 + line_number * (teacher_face.size + 3)),
+                          text, font=teacher_face, fill=colors["white"])
+        else:
+            teacher_face = fitted_font(draw, teacher, (17, 16, 15, 14), right - left)
+            draw.text((left, y + height - 84), teacher,
+                      font=teacher_face, fill=colors["white"])
+        room = str(item.get("place") or "—")
+        room_face = fitted_font(draw, room, (20, 18, 16, 14), right - left - 16)
+        room_width = min(right - left, text_width(draw, room, room_face) + 16)
+        draw.rounded_rectangle((left, y2 - 46, left + room_width, y2 - 12),
+                               radius=8, fill=colors["room"])
+        draw.text((left + 8, y2 - 43), room, font=room_face, fill=colors["white"])
 
 
 def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict],
@@ -117,10 +185,27 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
     for items in grouped.values():
         items.sort(key=lambda item: (item.get("removed", False), item["subject"], item.get("place", "")))
 
-    row_counts = [max(len(grouped.get(((start + timedelta(days=day)).isoformat(), begin), []))
-                      for day in range(7)) for begin, _ in slots]
-    row_heights = [max(CARD_HEIGHT, count * CARD_HEIGHT + max(0, count - 1) * ROW_GAP)
-                   for count in row_counts]
+    military_days = set()
+    for day in range(7):
+        date = (start + timedelta(days=day)).isoformat()
+        daily = [item for item in entries if item["date"] == date]
+        if (len(daily) >= 3 and not any(item.get("change") or item.get("removed") for item in daily)
+                and all("военная кафедра" in item["subject"].casefold() for item in daily)):
+            military_days.add(date)
+            for key in list(grouped):
+                if key[0] == date:
+                    del grouped[key]
+
+    row_counts = [max((1 if paired(items) else len(items))
+                      for day in range(7)
+                      for items in [grouped.get(((start + timedelta(days=day)).isoformat(), begin), [])])
+                  for begin, _ in slots]
+    row_heights = [max(CARD_HEIGHT,
+                       *(CARD_HEIGHT + 35 if paired(items) else
+                         len(items) * CARD_HEIGHT + max(0, len(items) - 1) * ROW_GAP
+                         for day in range(7)
+                         for items in [grouped.get(((start + timedelta(days=day)).isoformat(), begin), [])]))
+                   for begin, _ in slots]
     row_tops = []
     y = TOP
     for height in row_heights:
@@ -136,12 +221,13 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
               if start.month == end.month and start.year == end.year else
               f"{start.day} {MONTHS[start.month - 1]} — {end.day} {MONTHS[end.month - 1]} {end.year}")
     draw.text((MARGIN, 125), period, font=font(62, True), fill=colors["white"])
-    draw.rounded_rectangle((WIDTH - MARGIN - 165, 84, WIDTH - MARGIN, 142),
-                           radius=18, fill=colors["header"])
     group_font = next((font(size, True) for size in (31, 28, 25, 22, 20)
-                       if text_width(draw, group_name, font(size, True)) <= 145), font(20, True))
-    draw.text((WIDTH - MARGIN - 82 - text_width(draw, group_name, group_font) / 2, 93),
-              group_name, font=group_font, fill=colors["white"])
+                       if text_width(draw, group_name, font(size, True)) <= 500), font(20, True))
+    group_width = text_width(draw, group_name, group_font) + 38
+    group_left = WIDTH - MARGIN - group_width
+    draw.rounded_rectangle((group_left, 84, WIDTH - MARGIN, 142),
+                           radius=18, fill=colors["header"])
+    draw.text((group_left + 19, 93), group_name, font=group_font, fill=colors["white"])
     legend_x = MARGIN
     for name in ("Лекция", "Практика", "Лабораторная"):
         accent = colors["types"][name]
@@ -169,12 +255,20 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
         date_label = (start + timedelta(days=day)).strftime("%d.%m")
         draw.text((x + DAY_WIDTH - 16 - text_width(draw, date_label, font(23, True)), 273),
                   date_label, font=font(23, True), fill=colors["accent"])
+        if date in military_days:
+            continue
         if not occupied_by_day[date] and not any(item_date == date for item_date, _ in grouped):
             draw.rounded_rectangle((x, TOP, x + DAY_WIDTH, bottom), radius=20,
                                    fill=colors["section"])
-            label = "СВОБОДНЫЙ ДЕНЬ"
-            draw.text((x + (DAY_WIDTH - text_width(draw, label, font(21, True))) / 2,
-                       TOP + (bottom - TOP) / 2), label, font=font(21, True), fill=colors["muted"])
+            label = "ВЫХОДНОЙ" if day == 6 else "НЕТ ЗАНЯТИЙ"
+            label_font = fitted_font(draw, label, (35, 32, 29, 26), DAY_WIDTH - 28)
+            draw.text((x + (DAY_WIDTH - text_width(draw, label, label_font)) / 2,
+                       TOP + (bottom - TOP) / 2), label, font=label_font, fill=colors["muted"])
+            if day == 6:
+                extra = "Нет занятий"
+                draw.text((x + (DAY_WIDTH - text_width(draw, extra, font(22))) / 2,
+                           TOP + (bottom - TOP) / 2 + 54), extra,
+                          font=font(22), fill=colors["muted"])
 
     for index, (begin, finish) in enumerate(slots):
         y, row_height = row_tops[index], row_heights[index]
@@ -189,11 +283,15 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
         for day in range(7):
             date = (start + timedelta(days=day)).isoformat()
             x = MARGIN + TIME_WIDTH + GAP + day * (DAY_WIDTH + GAP)
+            if date in military_days:
+                continue
             if not occupied_by_day[date] and not any(item_date == date for item_date, _ in grouped):
                 continue
             items = grouped.get((date, begin), [])
             if items:
-                if len(items) == 1:
+                if paired(items):
+                    draw_parallel(draw, x, y, row_height, items, colors)
+                elif len(items) == 1:
                     draw_lesson(draw, x, y, row_height, items[0], 1, 1, colors)
                 else:
                     for number, item in enumerate(items, 1):
@@ -213,6 +311,19 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
             else:
                 draw.text((x + DAY_WIDTH / 2 - 9, y + row_height / 2 - 18),
                           "·", font=font(36), fill=colors["muted"])
+
+    for date in military_days:
+        day = (datetime.fromisoformat(date).date() - start).days
+        x = MARGIN + TIME_WIDTH + GAP + day * (DAY_WIDTH + GAP)
+        draw.rounded_rectangle((x, TOP, x + DAY_WIDTH, bottom), radius=20,
+                               fill=colors["tints"]["Лекция"])
+        draw.rounded_rectangle((x + 2, TOP + 18, x + 11, bottom - 18),
+                               radius=4, fill=colors["types"]["Лекция"])
+        for index, line in enumerate(("ВОЕННАЯ", "КАФЕДРА")):
+            title_font = fitted_font(draw, line, (50, 45, 40, 36), DAY_WIDTH - 36)
+            draw.text((x + (DAY_WIDTH - text_width(draw, line, title_font)) / 2,
+                       TOP + (bottom - TOP) / 2 - 45 + index * 58),
+                      line, font=title_font, fill=colors["white"])
 
     draw.text((MARGIN, height - 70), "ИСТОЧНИК: ДГТУ", font=font(21), fill=colors["footer"])
     output = io.BytesIO()

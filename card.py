@@ -60,6 +60,24 @@ def status_kind(marker: str) -> str:
     return "changed"
 
 
+def change_badge(marker: str) -> str:
+    return {"ДОБАВЛЕНО": "+ ДОБАВЛЕНО",
+            "УДАЛЕНО": "− УДАЛЕНО",
+            "АУДИТОРИЯ ИЗМЕНЕНА": "↔ АУДИТОРИЯ ИЗМЕНЕНА"}.get(marker, "↔ ИЗМЕНЕНО")
+
+
+def draw_change_badge(draw: ImageDraw.ImageDraw, right: int, top: int,
+                      marker: str, color: str, size: int = 18) -> int:
+    """Плашка изменения; возвращает её левую границу для размещения текста."""
+    label = change_badge(marker)
+    label_font = font(size, True)
+    width = text_width(draw, label, label_font) + 26
+    left = right - width
+    draw.rounded_rectangle((left, top, right, top + size + 15), radius=9, fill=color)
+    draw.text((left + 13, top + 5), label, font=label_font, fill="#25151A")
+    return left
+
+
 def draw_leaf(draw: ImageDraw.ImageDraw, x: int, y: int, size: int,
               angle: float, color: str) -> None:
     """Небольшой геометрический осенний лист для свободной части карточки."""
@@ -362,15 +380,14 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
                 status_color = colors["status"].get(kind)
                 accent = TYPE_COLORS.get(block["type"], CYAN)
                 draw.rounded_rectangle((62, ry, 898, ry + h), radius=16,
-                                       fill="#4A2D29" if kind == "removed" else TYPE_TINTS.get(block["type"], CARD),
-                                       outline=status_color, width=4 if changed else 1)
+                                       fill="#792F32" if kind == "removed" else TYPE_TINTS.get(block["type"], CARD))
                 draw.rounded_rectangle((62, ry + 10, 70, ry + h - 10), radius=3, fill=accent)
                 numbers = [n for n in block["pairs"] if n]
                 label = ((f"{numbers[0]}-я пара" if len(numbers) == 1
                           else f"пары {numbers[0]}–{numbers[-1]}") if numbers else "Пара")
                 draw.text((82, ry + 18), label, font=medium_bold, fill=accent)
                 draw.text((82, ry + 53), f"{block['start']}–{block['end']}", font=font(22, True), fill=WHITE)
-                title_y = ry + 14
+                title_y = ry + (56 if changed else 14)
                 for line in row["title_lines"]:
                     draw.text((300, title_y), line, font=title_font, fill=WHITE)
                     title_y += 37
@@ -379,21 +396,17 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
                     draw.text((300, detail_y), line, font=font(22, True), fill=WHITE)
                     detail_y += 29
                 if row["room_lines"]:
-                    room_top = ry + 14
+                    room_top = ry + (59 if changed else 14)
                     draw.rounded_rectangle((690, room_top, 898, room_top + row["room_height"]),
-                                           radius=12, fill=colors["room"],
-                                           outline=status_color if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else accent,
-                                           width=3)
-                    draw.text((704, room_top + 5), "АУДИТОРИЯ", font=font(17, True), fill=MUTED)
+                                           radius=12,
+                                           fill=status_color if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else colors["room"])
+                    room_text = "#25151A" if marker == "АУДИТОРИЯ ИЗМЕНЕНА" else WHITE
+                    draw.text((704, room_top + 5), "АУДИТОРИЯ", font=font(17, True), fill=room_text)
                     for index, line in enumerate(row["room_lines"]):
                         draw.text((704, room_top + 28 + index * 32), line,
-                                  font=font(23, True), fill=WHITE)
+                                  font=font(23, True), fill=room_text)
                 if changed:
-                    marker_face = font(19, True)
-                    marker_right = 300 + text_width(draw, marker, marker_face) + 30
-                    draw.rounded_rectangle((300, ry + h - 43, marker_right, ry + h - 8),
-                                           radius=9, fill=status_color)
-                    draw.text((315, ry + h - 39), marker, font=marker_face, fill="#25151A")
+                    draw_change_badge(draw, 886, ry + 9, marker, status_color, 18)
             ry += h + 10
     draw.text((48, height - 55), "Источник: ДГТУ", font=small, fill=colors["footer"])
     if theme == "autumn":

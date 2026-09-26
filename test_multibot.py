@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from bot import MultiBot, card_theme, horizontal_week_card, schedule_card, week_card
+from bot import MultiBot, card_theme, horizontal_week_card, list_week_card, schedule_card, week_card
+from horizontal_card import render_horizontal_week_card
 from test_bot import lesson
 
 
@@ -36,7 +37,8 @@ class MultiBotTests(unittest.TestCase):
     def test_two_chats_pair_and_keep_independent_settings(self):
         with TemporaryDirectory() as temp:
             with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
-                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                                        "TELEGRAM_PAIR_CODE": "secret",
+                                        "TELEGRAM_ACCESS": "code"}, clear=True):
                 app = MultiBot(Path(temp))
                 updates = [{"update_id": index, "message": {"chat": {"id": chat_id, "type": "private"},
                                                               "text": "/start secret"}}
@@ -56,6 +58,85 @@ class MultiBotTests(unittest.TestCase):
                 self.assertEqual(second["daily_time"], "08:00")
                 self.assertEqual(second["week_layout"], "horizontal")
                 self.assertTrue(second["seasonal_theme"])
+
+    def test_public_link_onboards_two_users_with_persistent_personal_profiles(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                        "TELEGRAM_PAIR_CODE": "замените-на-свой-секретный-код"}, clear=True):
+                app = MultiBot(root)
+                updates = [
+                    {"update_id": index, "message": {"chat": {"id": chat_id, "type": "private"}, "text": value}}
+                    for index, chat_id, value in ((1, 42, "/start"), (2, 77, "/start"),
+                                                  (3, 42, "ВКБ51"), (4, 77, "ПИ-31"))
+                ]
+
+                def reply(url, *args, **kwargs):
+                    return {"ok": True, "result": updates} if url.endswith("/getUpdates") else {"ok": True}
+
+                with patch("bot.request_json", side_effect=reply), \
+                     patch("bot.find_group_id", side_effect=[111, 222]), \
+                     patch("bot.fetch_schedule", side_effect=[{"1": lesson()}, {"2": lesson(code=2)}]), \
+                     patch.object(app, "send_profile_card"), patch.object(app, "show_settings"):
+                    self.assertTrue(app.telegram_commands("2026-09-24"))
+                first = app.state["profiles"]["telegram:42"]
+                second = app.state["profiles"]["telegram:77"]
+                self.assertEqual((first["group_name"], first["group_id"]), ("ВКБ51", 111))
+                self.assertEqual((second["group_name"], second["group_id"]), ("ПИ-31", 222))
+                self.assertNotEqual(first["snapshot"], second["snapshot"])
+                self.assertFalse(first["onboarding"])
+                first["daily_time"] = "19:30"
+                first["week_layout"] = "list"
+                self.assertEqual(second["daily_time"], "08:00")
+                self.assertEqual(second["week_layout"], "horizontal")
+                from bot import save_state
+                save_state(app.state_file, app.state)
+                restored = MultiBot(root)
+                self.assertEqual(restored.state["profiles"]["telegram:42"]["daily_time"], "19:30")
+                self.assertEqual(restored.state["profiles"]["telegram:42"]["week_layout"], "list")
+                self.assertEqual(restored.state["profiles"]["telegram:77"]["group_name"], "ПИ-31")
+
+    def test_public_onboarding_waits_for_group_before_fetching(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+                app = MultiBot(Path(temp))
+                update = {"update_id": 1, "message": {"chat": {"id": 42, "type": "private"},
+                                                      "text": "/start"}}
+
+                def reply(url, *args, **kwargs):
+                    return {"ok": True, "result": [update]} if url.endswith("/getUpdates") else {"ok": True}
+
+                with patch("bot.request_json", side_effect=reply) as request:
+                    app.telegram_commands("2026-09-24")
+                sent = [call.args[1] for call in request.call_args_list
+                        if call.args[0].endswith("/sendMessage")]
+                self.assertTrue(json.loads(sent[-1]["reply_markup"])["remove_keyboard"])
+                profile = app.state["profiles"]["telegram:42"]
+                self.assertTrue(profile["onboarding"])
+                self.assertEqual(profile["group_name"], "")
+                with patch.object(app, "telegram_commands", return_value=True), \
+                     patch("bot.find_group_id") as lookup, \
+                     patch("bot.fetch_schedule") as fetch:
+                    app.cycle()
+                lookup.assert_not_called()
+                fetch.assert_not_called()
+
+    def test_restricted_mode_still_requires_the_invitation_code(self):
+        with TemporaryDirectory() as temp:
+            with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                        "TELEGRAM_ACCESS": "code",
+                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                app = MultiBot(Path(temp))
+                updates = [{"update_id": index, "message": {"chat": {"id": 42, "type": "private"},
+                                                           "text": text}}
+                           for index, text in ((1, "/start"), (2, "/start wrong"))]
+
+                def reply(url, *args, **kwargs):
+                    return {"ok": True, "result": updates} if url.endswith("/getUpdates") else {"ok": True}
+
+                with patch("bot.request_json", side_effect=reply):
+                    app.telegram_commands("2026-09-24")
+                self.assertNotIn("telegram:42", app.state["profiles"])
 
     def test_group_change_only_affects_one_chat(self):
         with TemporaryDirectory() as temp:
@@ -120,6 +201,11 @@ class MultiBotTests(unittest.TestCase):
         with Image.open(BytesIO(week_card(snapshot, "2026-09-21", "ВКБ51", seasonal=False))) as vertical:
             self.assertEqual(vertical.width, 960)
             self.assertEqual(vertical.getpixel((0, 0)), (16, 25, 39))
+        with Image.open(BytesIO(list_week_card(snapshot, "2026-09-21", "ВКБ51"))) as clean_list:
+            self.assertEqual(clean_list.width, 1300)
+            self.assertEqual(clean_list.getpixel((0, 0)), (248, 247, 242))
+        with Image.open(BytesIO(list_week_card(snapshot, "2026-09-21", "ВКБ51", seasonal=False))) as classic_list:
+            self.assertEqual(classic_list.getpixel((0, 0)), (248, 251, 254))
         with Image.open(BytesIO(schedule_card(snapshot, "2026-09-22", "ВКБ51"))) as day:
             self.assertEqual(day.getpixel((0, 0)), (33, 27, 25))
         self.assertEqual(card_theme("2026-12-01"), "classic")
@@ -137,14 +223,34 @@ class MultiBotTests(unittest.TestCase):
                 with patch.object(app, "answer_callback"), patch.object(app, "show_settings"), \
                      patch.object(app, "send_profile_card") as send_card:
                     app.handle_profile_callback(first, callback("settings:layout:vertical"))
+                    app.handle_profile_callback(first, callback("settings:layout:list"))
                     app.handle_profile_callback(first, callback("settings:season:off"))
-                    app.handle_profile_callback(first, callback("settings:example:horizontal"))
-                self.assertEqual(first["week_layout"], "vertical")
+                    app.handle_profile_callback(first, callback("settings:example:list"))
+                self.assertEqual(first["week_layout"], "list")
                 self.assertFalse(first["seasonal_theme"])
                 self.assertEqual(second["week_layout"], "horizontal")
                 self.assertTrue(second["seasonal_theme"])
-                self.assertEqual(send_card.call_args.kwargs["layout_override"], "horizontal")
+                self.assertEqual(send_card.call_args.kwargs["layout_override"], "list")
                 self.assertFalse(send_card.call_args.kwargs["track"])
+                message, markup = app.layout_settings_view(first)
+                self.assertIn("Вид недельного расписания", message)
+                self.assertTrue(any(button["callback_data"] == "settings:layout:list"
+                                    for row in markup["inline_keyboard"] for button in row))
+
+    def test_two_parallel_entries_share_a_slot_three_expand_it(self):
+        def entry(number):
+            return {"date": "2026-09-22", "start": "16:00", "end": "17:35",
+                    "subject": "Иностранный язык", "type": "Практика",
+                    "teacher": f"Преподаватель {number}", "place": f"1-40{number}"}
+        sizes = []
+        for count in (1, 2, 3):
+            png = render_horizontal_week_card("ВКБ51", "2026-09-21",
+                                              [entry(number) for number in range(1, count + 1)],
+                                              (("16:00", "17:35"),), "autumn")
+            with Image.open(BytesIO(png)) as image:
+                sizes.append(image.height)
+        self.assertGreater(sizes[1], sizes[0])
+        self.assertGreater(sizes[2], sizes[1])
 
     def test_alert_settings_toggle_only_one_chat(self):
         with TemporaryDirectory() as temp:
@@ -239,7 +345,8 @@ class MultiBotTests(unittest.TestCase):
     def test_pairing_requests_immediate_refresh_and_welcome_card(self):
         with TemporaryDirectory() as temp:
             with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
-                                        "TELEGRAM_PAIR_CODE": "secret"}, clear=True):
+                                        "TELEGRAM_PAIR_CODE": "secret",
+                                        "TELEGRAM_ACCESS": "code"}, clear=True):
                 app = MultiBot(Path(temp))
                 update = {"update_id": 7, "message": {"chat": {"id": 42, "type": "private"},
                                                     "text": "/start secret"}}
