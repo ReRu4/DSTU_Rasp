@@ -277,18 +277,18 @@ PAIR_INDEX = {start: index for index, (start, _) in enumerate(PAIR_SLOTS)}
 BUTTON_TODAY = "📅 Сегодня"
 BUTTON_TOMORROW = "➡️ Завтра"
 BUTTON_PREVIOUS_WEEK = "◀️ Неделя"
-BUTTON_CURRENT_WEEK = "🗓 Эта неделя"
+BUTTON_CURRENT_WEEK = "🗓 Неделя"
+BUTTON_MONTH = "📆 Месяц"
 BUTTON_NEXT_WEEK = "Неделя ▶️"
 BUTTON_TEXT = "📝 Текст"
 BUTTON_SETTINGS = "⚙️ Настройки"
+KEYBOARD_VERSION = 3
 
 
 def telegram_keyboard() -> dict:
     return {
-        "keyboard": [[{"text": BUTTON_TODAY}, {"text": BUTTON_TOMORROW}],
-                     [{"text": BUTTON_PREVIOUS_WEEK}, {"text": BUTTON_NEXT_WEEK}],
-                     [{"text": BUTTON_CURRENT_WEEK}, {"text": BUTTON_TEXT}],
-                     [{"text": BUTTON_SETTINGS}]],
+        "keyboard": [[{"text": BUTTON_TODAY}, {"text": BUTTON_CURRENT_WEEK}],
+                     [{"text": BUTTON_MONTH}, {"text": BUTTON_SETTINGS}]],
         "resize_keyboard": True,
         "is_persistent": True,
     }
@@ -473,7 +473,7 @@ def week_card(snapshot: dict[str, dict], monday: str, group_name: str,
 
     days = []
     start = datetime.fromisoformat(monday).date()
-    for offset in range(7):
+    for offset in range(6):
         date = (start + timedelta(days=offset)).isoformat()
         lessons = sorted((x for x in snapshot.values() if lesson_date(x) == date), key=lesson_sort)
         slots = len({(x["датаНачала"], x["датаОкончания"]) for x in lessons})
@@ -521,7 +521,7 @@ def week_entries(snapshot: dict[str, dict], monday: str,
     entries = []
     for item in snapshot.values():
         date = lesson_date(item)
-        if not monday <= date <= (first_day + timedelta(days=6)).isoformat():
+        if not monday <= date <= (first_day + timedelta(days=5)).isoformat():
             continue
         subject, kind = subject_and_type(item)
         entries.append({"date": date, "start": item["датаНачала"][11:16],
@@ -532,7 +532,7 @@ def week_entries(snapshot: dict[str, dict], monday: str,
                         "change": changed.get(item["код"], "")})
     for item in (highlights or {}).get("removed") or []:
         date = lesson_date(item)
-        if monday <= date <= (first_day + timedelta(days=6)).isoformat():
+        if monday <= date <= (first_day + timedelta(days=5)).isoformat():
             subject, kind = subject_and_type(item)
             entries.append({"date": date, "start": item["датаНачала"][11:16],
                             "end": item["датаОкончания"][11:16], "subject": subject,
@@ -581,8 +581,8 @@ def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str,
 
 def week_message(snapshot: dict[str, dict], monday: str, group_name: str) -> str:
     start = datetime.fromisoformat(monday).date()
-    lines = [f"📅 Неделя {start:%d.%m}–{(start + timedelta(days=6)):%d.%m.%Y} · {group_name}"]
-    for offset in range(7):
+    lines = [f"📅 Неделя {start:%d.%m}–{(start + timedelta(days=5)):%d.%m.%Y} · {group_name}"]
+    for offset in range(6):
         date = (start + timedelta(days=offset)).isoformat()
         lines.append(day_message(snapshot, date, group_name))
     return "\n\n".join(lines)
@@ -590,10 +590,10 @@ def week_message(snapshot: dict[str, dict], monday: str, group_name: str) -> str
 
 def text_week_view(snapshot: dict[str, dict], monday: str, group_name: str) -> tuple[str, dict]:
     start = datetime.fromisoformat(monday).date()
-    end = start + timedelta(days=6)
+    end = start + timedelta(days=5)
     lines = [f"<b>НЕДЕЛЯ {start:%d.%m}–{end:%d.%m.%Y} · {html.escape(group_name)}</b>", ""]
     buttons = []
-    for offset in range(7):
+    for offset in range(6):
         day = start + timedelta(days=offset)
         lessons = sorted((item for item in snapshot.values() if lesson_date(item) == day.isoformat()),
                          key=lesson_sort)
@@ -604,7 +604,7 @@ def text_week_view(snapshot: dict[str, dict], monday: str, group_name: str) -> t
         else:
             detail = "нет пар"
         lines.append(f"<b>{WEEKDAY_SHORT[offset]} {day:%d.%m}</b> · {html.escape(detail)}")
-        if offset % 4 == 0:
+        if offset % 3 == 0:
             buttons.append([])
         buttons[-1].append({"text": f"{WEEKDAY_SHORT[offset]} {day.day}",
                             "callback_data": f"td:{day.isoformat()}"})
@@ -652,7 +652,7 @@ def text_day_view(snapshot: dict[str, dict], date: str, group_name: str) -> tupl
     if day.weekday() > 0:
         day_buttons.append({"text": "◀️ День", "callback_data": f"td:{(day - timedelta(days=1)).isoformat()}"})
     day_buttons.append({"text": "🗓 К неделе", "callback_data": f"tw:{monday}"})
-    if day.weekday() < 6:
+    if day.weekday() < 5:
         day_buttons.append({"text": "День ▶️", "callback_data": f"td:{(day + timedelta(days=1)).isoformat()}"})
     buttons = {"inline_keyboard": [day_buttons]}
     return "\n".join(lines), buttons
@@ -746,6 +746,25 @@ def save_state(path: Path, state: dict) -> None:
     tmp.replace(path)
 
 
+def profile_freshness(profile: dict) -> str:
+    """Время получения снимка, а не время изменения занятий или открытия карточки."""
+    timestamp = profile.get("last_fetch_at")
+    try:
+        checked = datetime.fromisoformat(timestamp).astimezone(MOSCOW).strftime("%d.%m.%Y в %H:%M МСК")
+    except (TypeError, ValueError):
+        checked = "время проверки неизвестно"
+    if profile.get("last_fetch_failed"):
+        if profile.get("snapshot") is None:
+            return "⚠️ Не удалось получить расписание ДГТУ. Сохранённой версии пока нет."
+        return ("⚠️ Не удалось проверить ДГТУ. Показана сохранённая версия.\n"
+                f"Последняя успешная проверка: {checked}.")
+    if profile.get("snapshot") is None:
+        return "🕒 Расписание ещё не загружено."
+    if not timestamp or checked == "время проверки неизвестно":
+        return "🕒 Сохранённое расписание · время проверки неизвестно."
+    return f"🕒 Проверено {checked}."
+
+
 class Bot:
     def __init__(self, root: Path):
         load_env(root / ".env")
@@ -826,7 +845,7 @@ class Bot:
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
         if inline_markup is None and chat_id == self.state.get("telegram_chat_id"):
-            self.state["telegram_keyboard_version"] = 1
+            self.state["telegram_keyboard_version"] = KEYBOARD_VERSION
 
     def send_text_view(self, chat_id: int, view: str, date: str, message_id: int | None = None) -> None:
         snapshot = self.state.get("snapshot")
@@ -860,13 +879,13 @@ class Bot:
         )
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
-        self.state["telegram_keyboard_version"] = 1
+        self.state["telegram_keyboard_version"] = KEYBOARD_VERSION
         return (response.get("result") or {}).get("message_id")
 
     def ensure_telegram_keyboard(self) -> None:
         if not self.telegram_token or not self.state.get("telegram_chat_id"):
             return
-        if self.state.get("telegram_keyboard_version") == 1:
+        if self.state.get("telegram_keyboard_version") == KEYBOARD_VERSION:
             return
         try:
             self.send_telegram_chat(self.state["telegram_chat_id"],
@@ -1262,7 +1281,8 @@ class MultiBot(Bot):
             if compact_name(vk["group_name"]) != compact_name(self.group_name):
                 vk.update({"group_name": self.group_name, "group_id": self.group_id,
                            "snapshot": None, "pending": [], "cards": {},
-                           "daily_queued": "", "weekly_queued": "", "group_checked_on": ""})
+                           "daily_queued": "", "weekly_queued": "", "group_checked_on": "",
+                           "last_fetch_at": "", "last_fetch_attempt_at": "", "last_fetch_failed": False})
             vk.update({"daily_time": self.daily_time, "week_layout": self.week_layout,
                        "seasonal_theme": self.seasonal_theme,
                        "alert_types": list(self.vk_alert_types)})
@@ -1287,6 +1307,7 @@ class MultiBot(Bot):
             "seasonal_theme": self.seasonal_theme,
             "alert_types": list(self.vk_alert_types if channel == "vk" else DEFAULT_ALERT_TYPES),
             "snapshot": old.get("snapshot") if legacy else None,
+            "last_fetch_at": "", "last_fetch_attempt_at": "", "last_fetch_failed": False,
             "pending": list(old.get("pending", {}).get(channel, [])) if legacy else [],
             "daily_queued": old.get("daily_queued", {}).get(channel, "") if legacy else "",
             "weekly_queued": old.get("weekly_queued", {}).get(channel, "") if legacy else "",
@@ -1320,7 +1341,7 @@ class MultiBot(Bot):
         if not response.get("ok"):
             raise RuntimeError(f"Telegram: {response.get('description')}")
         if profile and inline_markup is None and not profile.get("onboarding"):
-            profile["keyboard_version"] = 2
+            profile["keyboard_version"] = KEYBOARD_VERSION
 
     def send_profile_message(self, profile: dict, message: str,
                              inline_markup: dict | None = None) -> None:
@@ -1343,17 +1364,22 @@ class MultiBot(Bot):
             return list_week_card(snapshot, date, group_name, highlights, seasonal)
         return week_card(snapshot, date, group_name, highlights, seasonal)
 
+    def show_schedule(self, profile: dict, view: str, date: str) -> None:
+        """Точка входа просмотра; полная навигация добавляется в ScheduleBot."""
+        self.send_profile_card(profile, view, date)
+
     def send_profile_card(self, profile: dict, view: str, date: str,
                           replace: bool = False, layout_override: str | None = None,
                           track: bool = True) -> None:
         if profile.get("snapshot") is None:
-            self.send_profile_message(profile, "Расписание пока не загружено.")
+            self.send_profile_message(profile, profile_freshness(profile))
             return
         caption = (f"Расписание {profile['group_name']} на {datetime.fromisoformat(date):%d.%m.%Y}"
                    if view == "day" else
                    f"Расписание {profile['group_name']} на неделю с {datetime.fromisoformat(date):%d.%m.%Y}")
         if layout_override:
             caption = "Пример · " + caption
+        caption += "\n\n" + profile_freshness(profile)
         key = f"{view}:{date}"
         remembered = profile["cards"].get(key) or []
         ids = remembered if isinstance(remembered, list) else [remembered]
@@ -1376,7 +1402,7 @@ class MultiBot(Bot):
             message_id = (self.send_telegram_card(profile["chat_id"], png, caption)
                           if profile["channel"] == "telegram" else self.send_vk_card(png, caption))
             if profile["channel"] == "telegram":
-                profile["keyboard_version"] = 2
+                profile["keyboard_version"] = KEYBOARD_VERSION
             if track and message_id is not None:
                 ids = (ids + [message_id])[-20:]
                 profile["cards"][key] = ids
@@ -1384,13 +1410,14 @@ class MultiBot(Bot):
             LOG.warning("Не удалось отправить карточку %s: %s", key, exc)
             fallback = (day_message(profile["snapshot"], date, profile["group_name"])
                         if view == "day" else week_message(profile["snapshot"], date, profile["group_name"]))
+            fallback = profile_freshness(profile) + "\n\n" + fallback
             for part in split_message(fallback):
                 self.send_profile_message(profile, part)
 
     def ensure_telegram_keyboards(self) -> None:
         for profile in self.active_profiles():
             if (profile["channel"] == "telegram" and not profile.get("onboarding")
-                    and profile.get("group_name") and profile.get("keyboard_version") != 2):
+                    and profile.get("group_name") and profile.get("keyboard_version") != KEYBOARD_VERSION):
                 try:
                     self.send_telegram_chat(profile["chat_id"],
                                             "Кнопки расписания обновлены. Откройте «Настройки», чтобы выбрать группу и оформление.")
@@ -1408,9 +1435,11 @@ class MultiBot(Bot):
                    f"Неделя: {layout}\n"
                    f"Сезонное оформление: {seasonal}\n"
                    f"Уведомления: {alert_count} из {len(ALERT_LABELS)} видов\n\n"
+                   f"{profile_freshness(profile)}\n\n"
                    "Осенняя палитра действует для дат сентября–ноября. "
                    "Изменение времени начнёт действовать со следующей ежедневной отправки.")
         markup = {"inline_keyboard": [
+            [{"text": "🔄 Обновить расписание", "callback_data": "refresh:settings"}],
             [{"text": f"🎓 Группа · {profile['group_name']}", "callback_data": "settings:group"}],
             [{"text": f"⏰ Время · {profile['daily_time']}", "callback_data": "settings:time"}],
             [{"text": "🗓 Выберите вид недели", "callback_data": "settings:layouts"}],
@@ -1447,8 +1476,7 @@ class MultiBot(Bot):
         rows.append([{"text": "⬅️ К настройкам", "callback_data": "settings:back"}])
         message = ("🔔 Уведомления об изменениях\n\n"
                    "Отмеченные виды изменений вызывают оповещение. "
-                   "Ежедневная отправка расписания и обновление уже присланных карточек "
-                   "работают независимо от этих переключателей.")
+                   "Ежедневная отправка расписания работает независимо от этих переключателей.")
         return message, {"inline_keyboard": rows}
 
     def show_settings(self, profile: dict, message_id: int | None = None,
@@ -1472,10 +1500,13 @@ class MultiBot(Bot):
                                message_id: int | None = None) -> None:
         snapshot = profile.get("snapshot")
         if snapshot is None:
-            self.send_profile_message(profile, "Расписание пока не загружено.")
+            self.send_profile_message(profile, profile_freshness(profile), {
+                "inline_keyboard": [[{"text": "🔄 Обновить", "callback_data": f"refresh:{view}:{date}"}]]})
             return
         message, markup = (text_week_view(snapshot, date, profile["group_name"]) if view == "week"
                            else text_day_view(snapshot, date, profile["group_name"]))
+        message += "\n\n" + html.escape(profile_freshness(profile))
+        markup["inline_keyboard"].append([{"text": "🔄 Обновить", "callback_data": f"refresh:{view}:{date}"}])
         method = "editMessageText" if message_id else "sendMessage"
         params = {"chat_id": profile["chat_id"], "text": message, "parse_mode": "HTML",
                   "reply_markup": json.dumps(markup, ensure_ascii=False)}
@@ -1489,7 +1520,7 @@ class MultiBot(Bot):
     def navigate_profile_week(self, profile: dict, today: str, step: int) -> None:
         snapshot = profile.get("snapshot")
         if snapshot is None:
-            self.send_profile_message(profile, "Расписание пока не загружено.")
+            self.send_profile_message(profile, profile_freshness(profile))
             return
         anchor = profile.get("week_cursor") or week_start(today)
         try:
@@ -1515,14 +1546,17 @@ class MultiBot(Bot):
             return
         for monday, marker in sorted(batch["weeks"].items()):
             caption = f"Изменения {profile['group_name']} · неделя с {datetime.fromisoformat(monday):%d.%m.%Y}"
+            caption += "\n\n" + profile_freshness({"snapshot": batch["snapshot"],
+                                                      "last_fetch_at": batch.get("fetched_at")})
             try:
                 png = self.render_profile_card({**profile, "snapshot": batch["snapshot"]},
                                                "week", monday, marker)
                 self.send_telegram_card(profile["chat_id"], png, caption)
-                profile["keyboard_version"] = 2
+                profile["keyboard_version"] = KEYBOARD_VERSION
             except Exception as exc:
                 LOG.warning("Не удалось показать изменения за %s: %s", monday, exc)
-                for part in split_message(week_message(batch["snapshot"], monday, profile["group_name"])):
+                fallback = caption + "\n\n" + week_message(batch["snapshot"], monday, profile["group_name"])
+                for part in split_message(fallback):
                     self.send_profile_message(profile, part)
 
     def apply_user_input(self, profile: dict, value: str, today: str) -> None:
@@ -1552,6 +1586,10 @@ class MultiBot(Bot):
                             "daily_queued": today, "weekly_queued": "", "week_cursor": "",
                             "change_batches": {}, "awaiting": "", "onboarding": False,
                             "welcome_card_pending": False})
+            fetched_at = datetime.now(MOSCOW).isoformat(timespec="seconds")
+            profile.update({"last_fetch_at": fetched_at, "last_fetch_attempt_at": fetched_at,
+                            "last_fetch_failed": False})
+            save_state(self.state_file, self.state)
             self.send_profile_message(profile, f"Теперь показываю расписание группы {value}.")
             self.send_profile_card(profile, "day", today)
             self.show_settings(profile)
@@ -1560,7 +1598,9 @@ class MultiBot(Bot):
         action = str(callback.get("data") or "")
         message_id = (callback.get("message") or {}).get("message_id")
         callback_id = callback["id"]
-        if action.startswith("changes:"):
+        if action == "refresh:settings" or re.fullmatch(r"refresh:(day|week):\d{4}-\d{2}-\d{2}", action):
+            self.handle_refresh_callback(profile, callback)
+        elif action.startswith("changes:"):
             self.answer_callback(callback_id)
             self.show_profile_change_batch(profile, action.split(":", 1)[1])
         elif action.startswith(("tw:", "td:")):
@@ -1655,7 +1695,8 @@ class MultiBot(Bot):
                 argument = pieces[1].strip() if len(pieces) > 1 else ""
                 profile = self.profile_for_chat(chat_id)
                 known_buttons = {BUTTON_TODAY, BUTTON_TOMORROW, BUTTON_PREVIOUS_WEEK,
-                                 BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_TEXT, BUTTON_SETTINGS}
+                                 BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_TEXT, BUTTON_SETTINGS,
+                                 BUTTON_MONTH, "🗓 Эта неделя"}
                 if not profile:
                     authorized = (self.telegram_access == "public" or
                                   bool(self.pair_code and secrets.compare_digest(argument, self.pair_code)))
@@ -1702,14 +1743,17 @@ class MultiBot(Bot):
                 if profile.get("awaiting") and command and not command.startswith("/") and command not in known_buttons:
                     self.apply_user_input(profile, command, today)
                 elif verb == "/today" or command == BUTTON_TODAY:
-                    self.send_profile_card(profile, "day", today)
+                    self.show_schedule(profile, "day", today)
                 elif verb == "/tomorrow" or command == BUTTON_TOMORROW:
                     next_day = (datetime.fromisoformat(today) + timedelta(days=1)).date().isoformat()
-                    self.send_profile_card(profile, "day", next_day)
-                elif verb == "/week" or command == BUTTON_CURRENT_WEEK:
+                    self.show_schedule(profile, "day", next_day)
+                elif verb == "/week" or command in (BUTTON_CURRENT_WEEK, "🗓 Эта неделя"):
                     monday = week_start(today)
                     profile["week_cursor"] = monday
-                    self.send_profile_card(profile, "week", monday)
+                    self.show_schedule(profile, "week", monday)
+                elif verb == "/month" or command == BUTTON_MONTH:
+                    month = datetime.fromisoformat(today).replace(day=1).date().isoformat()
+                    self.show_schedule(profile, "month", month)
                 elif verb == "/nextweek":
                     profile["week_cursor"] = week_start(today)
                     self.navigate_profile_week(profile, today, 1)
@@ -1727,7 +1771,7 @@ class MultiBot(Bot):
                     profile["awaiting"] = ""
                     self.show_settings(profile)
                 elif verb in ("/start", "/help"):
-                    self.send_profile_message(profile, "Выберите день или неделю кнопками ниже. ⚙️ Настройки меняют группу, время и оформление.")
+                    self.send_profile_message(profile, "Выберите сегодня, неделю или месяц кнопками ниже. Стрелки под расписанием листают даты. ⚙️ Настройки меняют группу, формат и уведомления.")
                 self.state["telegram_offset"] = update["update_id"] + 1
                 save_state(self.state_file, self.state)
             return True
@@ -1808,7 +1852,7 @@ class MultiBot(Bot):
                                           if week_start(lesson_date(item)) in weeks}
                         batches = profile["change_batches"]
                         batches[batch_id] = {"snapshot": batch_snapshot, "weeks": weeks,
-                                             "created": today}
+                                             "created": today, "fetched_at": now.isoformat(timespec="seconds")}
                         while len(batches) > 20:
                             batches.pop(next(iter(batches)))
                     self.queue_profile(profile, "Будущие дни: " + future_message,
@@ -1822,6 +1866,9 @@ class MultiBot(Bot):
                 if f"week:{monday}" in profile["cards"]:
                     self.queue_profile_card(profile, "week", monday, "refresh")
         profile["snapshot"] = snapshot
+        profile.update({"last_fetch_at": now.isoformat(timespec="seconds"),
+                        "last_fetch_attempt_at": now.isoformat(timespec="seconds"),
+                        "last_fetch_failed": False})
 
     def queue_due(self, now: datetime) -> bool:
         today = now.date().isoformat()
@@ -1844,36 +1891,94 @@ class MultiBot(Bot):
             profile["card_tracking_ready"] = True
         return changed
 
+    def refresh_profiles(self, profiles: list[dict], now: datetime) -> None:
+        """Один запрос на группу; ошибка не заменяет снимки пустым расписанием."""
+        if not profiles:
+            return
+        first = profiles[0]
+        today = now.date().isoformat()
+        attempted_at = now.isoformat(timespec="seconds")
+        for profile in profiles:
+            profile["last_fetch_attempt_at"] = attempted_at
+        try:
+            group_id = int(first["group_id"])
+            if first.get("group_checked_on") != today:
+                try:
+                    group_id = find_group_id(first["group_name"])
+                except Exception as exc:
+                    LOG.warning("Поиск группы %s недоступен, использую ID %s: %s",
+                                first["group_name"], group_id, exc)
+            snapshot = fetch_schedule(group_id, first["group_name"])
+            if not snapshot and any(lesson_date(item) >= today for profile in profiles
+                                    for item in (profile.get("snapshot") or {}).values()):
+                raise RuntimeError("API неожиданно вернул пустое расписание; старые данные сохранены")
+        except Exception as exc:
+            for profile in profiles:
+                profile["last_fetch_failed"] = True
+            LOG.error("Не удалось обновить группу %s: %s", first["group_name"], exc)
+            return
+        checked_at = datetime.now(MOSCOW)
+        for profile in profiles:
+            self.process_profile_snapshot(profile, snapshot, checked_at)
+            profile.update({"group_id": group_id, "group_checked_on": today,
+                            "last_fetch_attempt_at": attempted_at})
+            if profile.get("welcome_card_pending"):
+                self.queue_profile_card(profile, "day", today, "daily")
+                profile["daily_queued"] = today
+                profile["welcome_card_pending"] = False
+
+    @staticmethod
+    def recently_checked(profiles: list[dict], now: datetime) -> bool:
+        for profile in profiles:
+            try:
+                previous = datetime.fromisoformat(profile.get("last_fetch_attempt_at", ""))
+                if 0 <= (now - previous).total_seconds() < 30:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        return False
+
+    def handle_refresh_callback(self, profile: dict, callback: dict) -> None:
+        action = callback["data"]
+        message_id = (callback.get("message") or {}).get("message_id")
+        if action != "refresh:settings":
+            _, view, date = action.split(":", 2)
+            try:
+                datetime.fromisoformat(date)
+            except ValueError:
+                self.answer_callback(callback["id"], "Кнопка устарела")
+                return
+        group_key = compact_name(profile["group_name"])
+        peers = [item for item in self.active_profiles()
+                 if not item.get("onboarding") and compact_name(item.get("group_name", "")) == group_key]
+        now = datetime.now(MOSCOW)
+        if self.recently_checked(peers, now):
+            self.answer_callback(callback["id"], "Повторная проверка доступна через 30 секунд после предыдущей.")
+        else:
+            self.answer_callback(callback["id"], "Проверяю расписание…")
+            self.refresh_profiles(peers, now)
+            save_state(self.state_file, self.state)
+        if action == "refresh:settings":
+            self.show_settings(profile, message_id)
+        else:
+            self.send_profile_text_view(profile, view, date, message_id)
+
     def cycle(self) -> None:
         now = datetime.now(MOSCOW)
         today = now.date().isoformat()
         self.telegram_commands(today)
-        cache: dict[str, tuple[int, dict]] = {}
+        now = datetime.now(MOSCOW)
+        today = now.date().isoformat()
+        groups: dict[str, list[dict]] = defaultdict(list)
         for profile in self.active_profiles():
             if profile.get("onboarding") or not profile.get("group_name") or not profile.get("group_id"):
                 continue
-            group_key = compact_name(profile["group_name"])
-            try:
-                if group_key not in cache:
-                    group_id = int(profile["group_id"])
-                    if profile.get("group_checked_on") != today:
-                        try:
-                            group_id = find_group_id(profile["group_name"])
-                        except Exception as exc:
-                            LOG.warning("Поиск группы %s недоступен, использую ID %s: %s",
-                                        profile["group_name"], group_id, exc)
-                    snapshot = fetch_schedule(group_id, profile["group_name"])
-                    cache[group_key] = (group_id, snapshot)
-                group_id, snapshot = cache[group_key]
-                profile["group_id"] = group_id
-                profile["group_checked_on"] = today
-                self.process_profile_snapshot(profile, snapshot, now)
-                if profile.get("welcome_card_pending"):
-                    self.queue_profile_card(profile, "day", today, "daily")
-                    profile["daily_queued"] = today
-                    profile["welcome_card_pending"] = False
-            except Exception as exc:
-                LOG.error("Не удалось обновить группу %s: %s", profile["group_name"], exc)
+            groups[compact_name(profile["group_name"])].append(profile)
+        for profiles in groups.values():
+            needs_initial_card = any(profile.get("snapshot") is None or profile.get("welcome_card_pending")
+                                     for profile in profiles)
+            if needs_initial_card or not self.recently_checked(profiles, now):
+                self.refresh_profiles(profiles, now)
         self.queue_due(now)
         save_state(self.state_file, self.state)
         self.ensure_telegram_keyboards()
@@ -1998,7 +2103,8 @@ def main() -> int:
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, stop)
     try:
-        bot = MultiBot(Path(__file__).resolve().parent)
+        from app_bot import ScheduleBot
+        bot = ScheduleBot(Path(__file__).resolve().parent)
     except Exception as exc:
         LOG.error("Ошибка настройки: %s", exc)
         return 2
@@ -2026,4 +2132,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Расширения импортируют этот же модуль и используют общую HTTP-сессию.
+    sys.modules["bot"] = sys.modules[__name__]
     sys.exit(main())

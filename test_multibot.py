@@ -11,12 +11,149 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from bot import MultiBot, card_theme, horizontal_week_card, list_week_card, schedule_card, week_card
+from bot import (MultiBot, KEYBOARD_VERSION, card_theme, horizontal_week_card, list_week_card,
+                 profile_freshness, schedule_card, week_card)
 from horizontal_card import render_horizontal_week_card
 from test_bot import lesson
 
 
 class MultiBotTests(unittest.TestCase):
+    def test_freshness_survives_outage_restart_and_recovery(self):
+        class Clock(datetime):
+            hour = 9
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 9, 24, cls.hour, 0, tzinfo=tz)
+
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True), \
+             patch("bot.datetime", Clock):
+            app = MultiBot(Path(temp))
+            profile = app.new_profile("telegram", 42)
+            profile.update({"group_checked_on": "2026-09-24", "keyboard_version": KEYBOARD_VERSION,
+                            "daily_time": "23:59"})
+            app.state["profiles"] = {"telegram:42": profile}
+            snapshot = {"1": lesson()}
+            with patch.object(app, "telegram_commands"), patch.object(app, "drain"), \
+                 patch("bot.fetch_schedule", return_value=snapshot):
+                app.cycle()
+            self.assertEqual(profile["last_fetch_at"], "2026-09-24T09:00:00+03:00")
+            self.assertIn("Проверено 24.09.2026 в 09:00 МСК", profile_freshness(profile))
+            Clock.hour = 10
+            with patch.object(app, "telegram_commands"), patch.object(app, "drain"), \
+                 patch("bot.fetch_schedule", side_effect=RuntimeError("offline")):
+                app.cycle()
+            restored = MultiBot(Path(temp))
+            saved = restored.profile_for_chat(42)
+            self.assertEqual(saved["snapshot"], snapshot)
+            self.assertEqual(saved["last_fetch_at"], "2026-09-24T09:00:00+03:00")
+            self.assertEqual(saved["last_fetch_attempt_at"], "2026-09-24T10:00:00+03:00")
+            self.assertTrue(saved["last_fetch_failed"])
+            self.assertIn("Показана сохранённая версия", profile_freshness(saved))
+            Clock.hour = 11
+            with patch.object(restored, "telegram_commands"), patch.object(restored, "drain"), \
+                 patch("bot.fetch_schedule", return_value=snapshot):
+                restored.cycle()
+            self.assertFalse(saved["last_fetch_failed"])
+            self.assertEqual(saved["last_fetch_at"], "2026-09-24T11:00:00+03:00")
+            self.assertNotIn("сохранённая версия", profile_freshness(saved))
+
+    def test_failed_group_check_is_shared_and_empty_response_keeps_snapshot(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            app = MultiBot(Path(temp))
+            first, second = app.new_profile("telegram", 42), app.new_profile("telegram", 77)
+            app.state["profiles"] = {"telegram:42": first, "telegram:77": second}
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
+            snapshot = {"1": lesson(start=f"{now.date().isoformat()}T08:30:00")}
+            for profile in (first, second):
+                profile.update({"snapshot": snapshot, "group_checked_on": now.date().isoformat()})
+            for response in (RuntimeError("offline"), {}):
+                options = ({"side_effect": response} if isinstance(response, Exception)
+                           else {"return_value": response})
+                with patch("bot.fetch_schedule", **options) as fetch:
+                    app.refresh_profiles([first, second], now)
+                self.assertEqual(fetch.call_count, 1)
+                for profile in (first, second):
+                    self.assertEqual(profile["snapshot"], snapshot)
+                    self.assertTrue(profile["last_fetch_failed"])
+                    self.assertEqual(profile["last_fetch_at"], "")
+                    self.assertEqual(profile["pending"], [])
+            self.assertIn("время проверки неизвестно", profile_freshness(first))
+            self.assertIn("Сохранённой версии пока нет", profile_freshness({
+                "snapshot": None, "last_fetch_failed": True}))
+
+    def test_manual_refresh_updates_same_group_only_and_throttles_repeat(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            app = MultiBot(Path(temp))
+            first, second, other = [app.new_profile("telegram", chat) for chat in (42, 77, 99)]
+            today = datetime.now(ZoneInfo("Europe/Moscow")).date().isoformat()
+            for profile in (first, second, other):
+                profile["group_checked_on"] = today
+            second["daily_time"] = "19:30"
+            other.update({"group_name": "ПИ31", "group_id": 54321})
+            app.state["profiles"] = {"telegram:42": first, "telegram:77": second, "telegram:99": other}
+            callback = {"id": "cb", "data": "refresh:settings", "message": {"message_id": 10}}
+            snapshot = {"1": lesson()}
+            with patch("bot.fetch_schedule", return_value=snapshot) as fetch, \
+                 patch.object(app, "answer_callback") as answer, patch.object(app, "show_settings"):
+                app.handle_profile_callback(first, callback)
+                app.handle_profile_callback(second, callback)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertIn("30 секунд", answer.call_args.args[1])
+            self.assertEqual(first["snapshot"], snapshot)
+            self.assertEqual(second["snapshot"], snapshot)
+            self.assertEqual(first["last_fetch_at"], second["last_fetch_at"])
+            self.assertEqual(second["daily_time"], "19:30")
+            self.assertIsNone(other["snapshot"])
+            self.assertEqual(other["last_fetch_at"], "")
+            self.assertEqual(MultiBot(Path(temp)).profile_for_chat(42)["snapshot"], snapshot)
+
+    def test_freshness_is_visible_in_card_caption_text_and_settings(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            app = MultiBot(Path(temp))
+            profile = app.new_profile("telegram", 42)
+            profile.update({"snapshot": {"1": lesson()}, "last_fetch_failed": True,
+                            "last_fetch_at": "2026-09-24T08:00:00+03:00"})
+            app.state["profiles"] = {"telegram:42": profile}
+            with patch.object(app, "render_profile_card", return_value=b"png"), \
+                 patch.object(app, "send_telegram_card", return_value=10) as send:
+                app.send_profile_card(profile, "day", "2026-09-24")
+            self.assertIn("Показана сохранённая версия", send.call_args.args[2])
+            with patch("bot.request_json", return_value={"ok": True}) as request:
+                app.send_profile_text_view(profile, "week", "2026-09-21")
+            sent = request.call_args.args[1]
+            self.assertIn("24.09.2026 в 08:00 МСК", sent["text"])
+            markup = json.loads(sent["reply_markup"])
+            self.assertEqual(markup["inline_keyboard"][-1][0]["callback_data"], "refresh:week:2026-09-21")
+            message, settings = app.settings_view(profile)
+            self.assertIn("Показана сохранённая версия", message)
+            self.assertEqual(settings["inline_keyboard"][0][0]["callback_data"], "refresh:settings")
+            self.assertIn("время проверки неизвестно", profile_freshness({"snapshot": {}}))
+
+    def test_recent_group_check_does_not_delay_new_subscribers_welcome(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            app = MultiBot(Path(temp))
+            first, newcomer = app.new_profile("telegram", 42), app.new_profile("telegram", 77)
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
+            snapshot = {"1": lesson(start=f"{now.date().isoformat()}T08:30:00")}
+            first.update({"snapshot": snapshot, "last_fetch_attempt_at": now.isoformat(timespec="seconds"),
+                          "group_checked_on": now.date().isoformat()})
+            newcomer["welcome_card_pending"] = True
+            app.state["profiles"] = {"telegram:42": first, "telegram:77": newcomer}
+            with patch.object(app, "telegram_commands"), patch.object(app, "drain"), \
+                 patch.object(app, "ensure_telegram_keyboards"), \
+                 patch("bot.fetch_schedule", return_value=snapshot) as fetch:
+                app.cycle()
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(newcomer["snapshot"], snapshot)
+            self.assertFalse(newcomer["welcome_card_pending"])
+            self.assertTrue(any(item["kind"] == "daily" for item in newcomer["pending"]))
+
     def test_old_chat_and_snapshot_migrate_without_pairing_again(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -175,7 +312,7 @@ class MultiBotTests(unittest.TestCase):
                 for profile in (first, second):
                     profile["snapshot"] = snapshot
                     profile["group_checked_on"] = "2026-09-24"
-                    profile["keyboard_version"] = 2
+                    profile["keyboard_version"] = KEYBOARD_VERSION
                 second["daily_time"] = "10:00"
                 with patch("bot.datetime", FixedDateTime), \
                      patch.object(app, "telegram_commands", return_value=True), \

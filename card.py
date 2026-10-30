@@ -288,7 +288,7 @@ def render_card(group_name: str, date: str, blocks: list[dict], slot_count: int,
 
 def render_week_card(group_name: str, monday: str, days: list[dict],
                      theme: str = "classic") -> bytes:
-    """Компактная карточка недели: семь дней, цветные пары и отдельные окна."""
+    """Компактная карточка с понедельника по субботу, цветными парами и окнами."""
     colors = palette(theme)
     BACKGROUND, CARD, WHITE, MUTED, CYAN = (colors[key] for key in
                                              ("background", "card", "white", "muted", "accent"))
@@ -298,6 +298,8 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
     layouts = []
     y = 270
     for day in days:
+        if datetime.fromisoformat(day["date"]).weekday() == 6:
+            continue
         rows = []
         for block in day["blocks"]:
             if block.get("window"):
@@ -334,7 +336,7 @@ def render_week_card(group_name: str, monday: str, days: list[dict],
     draw.text((842 - text_width(draw, group_name, group_font) / 2, 83),
               group_name, font=group_font, fill=WHITE)
     start = datetime.fromisoformat(monday)
-    end = datetime.fromordinal(start.toordinal() + 6)
+    end = datetime.fromordinal(start.toordinal() + 5)
     period = f"{start.day} {MONTHS[start.month - 1]} — {end.day} {MONTHS[end.month - 1]}"
     draw.text((48, 135), period, font=large, fill=WHITE)
     years = str(start.year) if start.year == end.year else f"{start.year}–{end.year}"

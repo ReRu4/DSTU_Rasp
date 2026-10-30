@@ -57,14 +57,14 @@ def render_list_week_card(group_name: str, monday: str, entries: list[dict],
     type_colors = (TYPE_COLORS if theme == "autumn" else
                    {"Лекция": "#247A61", "Практика": "#B66D25", "Лабораторная": "#7851A1"})
     start = datetime.fromisoformat(monday).date()
-    end = start + timedelta(days=6)
+    end = start + timedelta(days=5)
     grouped: dict[str, list[dict]] = defaultdict(list)
     for item in entries:
         grouped[item["date"]].append(item)
     measure = ImageDraw.Draw(Image.new("RGB", (WIDTH, 100), bg))
     days = []
     y = 274
-    for offset in range(7):
+    for offset in range(6):
         day = start + timedelta(days=offset)
         items = grouped.get(day.isoformat(), [])
         rows = []
@@ -108,8 +108,7 @@ def render_list_week_card(group_name: str, monday: str, entries: list[dict],
                                    fill=type_colors["Лекция"])
             draw.text((365, top + 33), "ВОЕННАЯ КАФЕДРА", font=font(37, True), fill=ink)
         elif not items:
-            label = "ВЫХОДНОЙ" if day.weekday() == 6 else "Нет занятий"
-            draw.text((365, top + 35), label, font=font(29, True), fill=muted)
+            draw.text((365, top + 35), "Нет занятий", font=font(29, True), fill=muted)
         else:
             row_top = top + 13
             for item, title_lines, row_height in rows:

@@ -7,4 +7,5 @@ COPY bot.py /app/bot.py
 COPY card.py /app/card.py
 COPY horizontal_card.py /app/horizontal_card.py
 COPY list_card.py /app/list_card.py
+COPY app_bot.py navigation.py watch_groups.py month_card.py /app/
 CMD ["python", "-u", "bot.py"]

@@ -10,7 +10,8 @@ from unittest.mock import patch
 import requests
 from PIL import Image
 
-from bot import (BUTTON_CURRENT_WEEK, BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, BUTTON_TEXT, Bot,
+from bot import (BUTTON_CURRENT_WEEK, BUTTON_MONTH, BUTTON_TODAY, BUTTON_SETTINGS, KEYBOARD_VERSION,
+                 BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, BUTTON_TEXT, Bot,
                  changes_message, day_message, future_change_weeks, horizontal_week_card, normalize_lesson,
                  proxy_for_url, request_json, schedule_card, schedule_changes, split_message, text_day_view,
                  text_week_view, week_card)
@@ -238,8 +239,7 @@ class ScheduleTests(unittest.TestCase):
                 markup = json.loads(send.call_args.args[1]["reply_markup"])
                 self.assertTrue(markup["is_persistent"])
                 labels = [button["text"] for row in markup["keyboard"] for button in row]
-                self.assertIn(BUTTON_PREVIOUS_WEEK, labels)
-                self.assertIn(BUTTON_NEXT_WEEK, labels)
+                self.assertEqual(labels, [BUTTON_TODAY, BUTTON_CURRENT_WEEK, BUTTON_MONTH, BUTTON_SETTINGS])
 
     def test_existing_chat_gets_navigation_keyboard_once(self):
         with TemporaryDirectory() as temp:
@@ -251,7 +251,7 @@ class ScheduleTests(unittest.TestCase):
                 self.assertEqual(api.call_count, 1)
                 markup = json.loads(api.call_args.args[1]["reply_markup"])
                 self.assertTrue(markup["resize_keyboard"])
-                self.assertEqual(app.state["telegram_keyboard_version"], 1)
+                self.assertEqual(app.state["telegram_keyboard_version"], KEYBOARD_VERSION)
 
     def test_week_buttons_can_browse_multiple_past_weeks(self):
         with TemporaryDirectory() as temp:
@@ -362,7 +362,7 @@ class ScheduleTests(unittest.TestCase):
                     "2": lesson(code=2, start="2026-10-01T09:00:00", room="201"),
                 }
                 app.state["group_checked_on"] = "2026-09-24"
-                app.state["telegram_keyboard_version"] = 1
+                app.state["telegram_keyboard_version"] = KEYBOARD_VERSION
                 updated = {
                     "1": lesson(start="2026-09-25T09:00:00", room="102"),
                     "2": lesson(code=2, start="2026-10-01T09:00:00", room="202"),

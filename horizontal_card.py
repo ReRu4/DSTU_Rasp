@@ -17,11 +17,12 @@ WIDTH = 2880
 MARGIN = 64
 TIME_WIDTH = 136
 GAP = 12
-DAY_WIDTH = (WIDTH - 2 * MARGIN - TIME_WIDTH - 8 * GAP) // 7
+WEEKDAYS = ("ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА")
+DAY_COUNT = len(WEEKDAYS)
+DAY_WIDTH = (WIDTH - 2 * MARGIN - TIME_WIDTH - DAY_COUNT * GAP) // DAY_COUNT
 TOP = 330
 CARD_HEIGHT = 265
 ROW_GAP = 10
-WEEKDAYS = ("ПОНЕДЕЛЬНИК", "ВТОРНИК", "СРЕДА", "ЧЕТВЕРГ", "ПЯТНИЦА", "СУББОТА", "ВОСКРЕСЕНЬЕ")
 
 
 def horizontal_colors(theme: str) -> dict:
@@ -170,7 +171,8 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
     """Все совпадающие по времени записи получают отдельные блоки в общей строке."""
     colors = horizontal_colors(theme)
     start = datetime.fromisoformat(monday).date()
-    end = start + timedelta(days=6)
+    end = start + timedelta(days=DAY_COUNT - 1)
+    entries = [item for item in entries if start.isoformat() <= item["date"] <= end.isoformat()]
 
     # Нестандартное время тоже должно появиться в таблице.
     slot_ends = {begin: finish for begin, finish in base_slots}
@@ -186,7 +188,7 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
         items.sort(key=lambda item: (item.get("removed", False), item["subject"], item.get("place", "")))
 
     military_days = set()
-    for day in range(7):
+    for day in range(DAY_COUNT):
         date = (start + timedelta(days=day)).isoformat()
         daily = [item for item in entries if item["date"] == date]
         if (len(daily) >= 3 and not any(item.get("change") or item.get("removed") for item in daily)
@@ -197,13 +199,13 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
                     del grouped[key]
 
     row_counts = [max((1 if paired(items) else len(items))
-                      for day in range(7)
+                      for day in range(DAY_COUNT)
                       for items in [grouped.get(((start + timedelta(days=day)).isoformat(), begin), [])])
                   for begin, _ in slots]
     row_heights = [max(CARD_HEIGHT,
                        *(CARD_HEIGHT + 35 if paired(items) else
                          len(items) * CARD_HEIGHT + max(0, len(items) - 1) * ROW_GAP
-                         for day in range(7)
+                         for day in range(DAY_COUNT)
                          for items in [grouped.get(((start + timedelta(days=day)).isoformat(), begin), [])]))
                    for begin, _ in slots]
     row_tops = []
@@ -243,7 +245,7 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
 
     occupied_by_day: dict[str, list[int]] = {}
     slot_index = {begin: index for index, (begin, _) in enumerate(slots)}
-    for day in range(7):
+    for day in range(DAY_COUNT):
         date = (start + timedelta(days=day)).isoformat()
         occupied_by_day[date] = [slot_index[begin] for (item_date, begin), values in grouped.items()
                                  if item_date == date and any(not value.get("removed") for value in values)]
@@ -260,15 +262,10 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
         if not occupied_by_day[date] and not any(item_date == date for item_date, _ in grouped):
             draw.rounded_rectangle((x, TOP, x + DAY_WIDTH, bottom), radius=20,
                                    fill=colors["section"])
-            label = "ВЫХОДНОЙ" if day == 6 else "НЕТ ЗАНЯТИЙ"
+            label = "НЕТ ЗАНЯТИЙ"
             label_font = fitted_font(draw, label, (35, 32, 29, 26), DAY_WIDTH - 28)
             draw.text((x + (DAY_WIDTH - text_width(draw, label, label_font)) / 2,
                        TOP + (bottom - TOP) / 2), label, font=label_font, fill=colors["muted"])
-            if day == 6:
-                extra = "Нет занятий"
-                draw.text((x + (DAY_WIDTH - text_width(draw, extra, font(22))) / 2,
-                           TOP + (bottom - TOP) / 2 + 54), extra,
-                          font=font(22), fill=colors["muted"])
 
     for index, (begin, finish) in enumerate(slots):
         y, row_height = row_tops[index], row_heights[index]
@@ -280,7 +277,7 @@ def render_horizontal_week_card(group_name: str, monday: str, entries: list[dict
         if row_counts[index] > 1:
             draw.text((MARGIN + 18, y + 175), f"{row_counts[index]} ЗАПИСИ",
                       font=font(15, True), fill=colors["overlap"])
-        for day in range(7):
+        for day in range(DAY_COUNT):
             date = (start + timedelta(days=day)).isoformat()
             x = MARGIN + TIME_WIDTH + GAP + day * (DAY_WIDTH + GAP)
             if date in military_days:
