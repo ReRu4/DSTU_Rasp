@@ -37,6 +37,28 @@ class ScheduleTests(unittest.TestCase):
         self.assertIn("аудитория: 101 → 102", message)
         self.assertEqual(message.count("Изменено:"), 1)
 
+    def test_change_filter_mutes_added_removed_and_changed_lessons_in_text_and_highlights(self):
+        military = lesson(start="2026-09-25T08:30:00")
+        military["дисциплина"] = "лек Военная кафедра"
+        revised = dict(military, аудитория="102")
+        other = lesson(code=2, start="2026-09-25T12:00:00")
+        other_revised = dict(other, аудитория="202")
+
+        def allowed(before, after):
+            return all("Военная кафедра" not in item["дисциплина"] for item in (before, after) if item)
+
+        for before, after in ((military, revised), (None, military), (military, None)):
+            with self.subTest(before=before is not None, after=after is not None):
+                old = {"2": other, **({"1": before} if before else {})}
+                new = {"2": other_revised, **({"1": after} if after else {})}
+                message = changes_message(old, new, "2026-09-24", "ВКБ51", change_filter=allowed)
+                self.assertNotIn("Военная кафедра", message)
+                self.assertIn("Тестовый предмет", message)
+                self.assertEqual(message.count("Изменено:"), 1)
+                weeks = future_change_weeks(old, new, "2026-09-24", change_filter=allowed)
+                self.assertEqual(weeks, {"2026-09-21": {"changed": {"2": "АУДИТОРИЯ ИЗМЕНЕНА"},
+                                                         "removed": []}})
+
     def test_change_notice_shows_readable_date_and_time(self):
         old = {"1": lesson(start="2026-09-25T08:30:00")}
         new = {"1": lesson(start="2026-09-25T10:15:00")}
@@ -324,6 +346,23 @@ class ScheduleTests(unittest.TestCase):
                      patch.object(app, "send_telegram_chat") as send_text:
                     app.send_schedule("telegram", "2026-09-24")
                 self.assertIn("Тестовый предмет", send_text.call_args.args[1])
+
+    def test_legacy_daily_queue_also_skips_sunday_and_expires_week_on_sunday(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token", "TELEGRAM_CHAT_ID": "42"}, clear=True):
+            app = Bot(Path(temp))
+            app.queue_daily("telegram", "2026-11-22")
+            self.assertEqual(app.state["pending"]["telegram"], [])
+            app.state["pending"]["telegram"] = [
+                {"kind": "daily", "view": "day", "format": "card", "date": "2026-11-22"},
+                {"kind": "daily", "text": "Воскресенье", "date": "2026-11-22"},
+                {"kind": "weekly", "view": "week", "format": "card", "date": "2026-11-16"},
+            ]
+            with patch.object(app, "send_card") as card, patch.object(app, "send") as message:
+                app.drain("2026-11-22")
+            card.assert_not_called()
+            message.assert_not_called()
+            self.assertEqual(app.state["pending"]["telegram"], [])
 
     def test_schedule_change_edits_day_and_week_cards(self):
         class FixedDateTime(datetime):

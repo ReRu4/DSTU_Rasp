@@ -9,7 +9,7 @@ from unittest.mock import patch
 import bot
 from bot import MultiBot
 from test_bot import lesson
-from watch_groups import WatchGroupsMixin
+from watch_groups import WatchGroupsMixin, notification_subject, subject_token
 
 
 class WatchApp(WatchGroupsMixin, MultiBot):
@@ -222,6 +222,133 @@ class WatchGroupsTests(unittest.TestCase):
         self.assertEqual(fetch.call_args.args[0], self.owner['group_id'])
         self.assertEqual(self.owner['selected_group_id'], self.owner['group_id'])
         self.assertEqual(child['snapshot'], self.snapshot(code=2))
+
+    def test_muted_military_changes_update_all_snapshots_and_cards_without_alerts(self):
+        child = self.child()
+        military = self.snapshot()['1']
+        military['дисциплина'] = 'лек Военная кафедра (ЦВПР с.запаса чт)'
+        second = {**military, 'код': '2', 'дисциплина': 'пр Военная кафедра (ЦВПР запаса пт)'}
+        ordinary = self.snapshot(code=3)['3']
+        self.owner.update({'multigroup_enabled': True, 'send_schedule_on_change': True,
+                           'muted_subjects': {'военная кафедра': 'Военная кафедра'},
+                           'snapshot': {'1': military}, 'cards': {'day:2026-10-31': [91]}})
+        child.update({'snapshot': {'2': second, '3': ordinary},
+                      'cards': {'week:2026-10-26': [92]}, 'last_fetch_failed': True})
+        self.app.process_profile_snapshot(self.owner, {'1': {**military, 'аудитория': '333'}}, self.now)
+        self.app.process_profile_snapshot(child, {'2': {**second, 'аудитория': '444'},
+                                                 '3': {**ordinary, 'аудитория': '555'}}, self.now)
+        self.app.flush_group_reports()
+        reports = [item for item in self.owner['pending'] if item['kind'] == 'combined_change']
+        self.assertEqual(len(reports), 1)
+        self.assertNotIn('Военная кафедра', reports[0]['text'])
+        self.assertIn('Тестовый предмет', reports[0]['text'])
+        self.assertEqual(self.owner['snapshot']['1']['аудитория'], '333')
+        self.assertEqual(child['snapshot']['2']['аудитория'], '444')
+        self.assertEqual(child['last_fetch_at'], self.now.isoformat(timespec='seconds'))
+        self.assertFalse(child['last_fetch_failed'])
+        batch = self.owner['change_batches'][reports[0]['batch_id']]
+        self.assertEqual(len(batch['groups']), 1)
+        markers = batch['groups'][0]['weeks']['2026-10-26']['changed']
+        self.assertEqual(set(markers), {'3'})
+        automatic = [item for item in self.owner['pending'] if item['kind'] == 'change_card']
+        self.assertEqual(len(automatic), 1)
+        self.assertEqual(automatic[0]['source_group_id'], child['group_id'])
+        refreshes = [item for item in self.owner['pending'] if item['kind'] == 'refresh']
+        self.assertEqual({item['source_group_id'] for item in refreshes}, {self.owner['group_id'], 123})
+
+    def test_subject_switch_persists_covers_child_and_can_be_restored_without_new_data(self):
+        child = self.child()
+        child['snapshot'] = self.snapshot(code=2)
+        child['snapshot']['2']['дисциплина'] = 'лаб   Тестовый   предмет'
+        self.owner.update({'snapshot': self.snapshot(), 'multigroup_enabled': True})
+        subjects = self.app.notification_subjects(self.owner)
+        self.assertEqual(len(subjects), 1)
+        key, name = subjects[0]
+        callback = {'id': 'cb', 'data': f'subjects:toggle:{subject_token(key)}:0'}
+        with patch.object(self.app, 'answer_callback'), patch.object(self.app, 'show_subject_settings'):
+            self.app.handle_profile_callback(self.owner, callback)
+        self.assertEqual(self.owner['muted_subjects'], {key: name})
+        self.assertEqual(child['muted_subjects'], {key: name})
+        restored = WatchApp(self.root)
+        owner = restored.profile_for_chat(42)
+        self.assertFalse(restored.subject_change_allowed(owner, None, child['snapshot']['2']))
+        owner['snapshot'] = {}
+        owner['watched_groups']['123']['snapshot'] = {}
+        self.assertEqual(restored.notification_subjects(owner), [(key, name)])
+        with patch.object(restored, 'answer_callback'), patch.object(restored, 'show_subject_settings'):
+            restored.handle_profile_callback(owner, callback)
+        self.assertEqual(owner['muted_subjects'], {})
+
+    def test_muting_subject_is_personal_and_existing_type_filters_still_apply(self):
+        other = self.app.new_profile('telegram', 77)
+        other['snapshot'] = self.snapshot()
+        self.app.state['profiles']['telegram:77'] = other
+        key, name = notification_subject(self.snapshot()['1'])
+        self.owner.update({'snapshot': self.snapshot(), 'muted_subjects': {key: name},
+                           'send_schedule_on_change': True})
+        self.app.process_profile_snapshot(self.owner, self.snapshot('222'), self.now)
+        self.app.process_profile_snapshot(other, self.snapshot('222'), self.now)
+        self.app.flush_group_reports()
+        self.assertEqual(self.owner['pending'], [])
+        self.assertEqual(len(other['pending']), 1)
+        # Re-enabling starts from the current snapshot; it does not replay muted changes.
+        self.owner['muted_subjects'] = {}
+        self.owner['alert_types'] = ['teacher']
+        self.app.process_profile_snapshot(self.owner, self.snapshot('333'), self.now)
+        self.app.flush_group_reports()
+        self.assertEqual(self.owner['pending'], [])
+
+    def test_subject_filter_covers_add_remove_and_rename_on_either_side(self):
+        before = self.snapshot()['1']
+        self.owner['muted_subjects'] = {'тестовый предмет': 'Тестовый предмет'}
+        renamed = {**before, 'дисциплина': 'лек Другой предмет'}
+        variant = {**before, 'дисциплина': 'лаб ТЕСТОВЫЙ   ПРЕДМЕТ'}
+        for old, new in ((None, before), (before, None), (before, renamed), (renamed, before),
+                         (before, variant)):
+            with self.subTest(old=old, new=new):
+                self.assertFalse(self.app.subject_change_allowed(self.owner, old, new))
+        self.assertTrue(self.app.subject_change_allowed(self.owner, None, renamed))
+
+    def test_subject_menu_uses_all_enabled_groups_and_paginates_long_names(self):
+        child = self.child()
+        self.owner['snapshot'] = self.snapshot()
+        long_name = 'Предмет дополнительной группы с очень длинным полным названием дисциплины'
+        child['snapshot'] = {str(i): {**self.snapshot(code=i)[str(i)],
+                                     'дисциплина': f'пр {long_name} {i}'} for i in range(2, 9)}
+        self.assertEqual(len(self.app.notification_subjects(self.owner)), 1)
+        self.owner['multigroup_enabled'] = True
+        text, markup = self.app.subject_settings_view(self.owner)
+        self.assertIn(long_name, text)
+        self.assertIn('Страница 1 из 2', text)
+        toggles = [button for row in markup['inline_keyboard'] for button in row
+                   if button['callback_data'].startswith('subjects:toggle:')]
+        self.assertEqual(len(toggles), 6)
+        self.assertTrue(all(len(button['callback_data'].encode('utf-8')) <= 64 for button in toggles))
+        second_text, second_markup = self.app.subject_settings_view(self.owner, 1)
+        self.assertIn('Страница 2 из 2', second_text)
+        self.assertIn('Тестовый предмет', second_text)
+
+    def test_production_reload_skips_sunday_daily_and_expired_week_but_sends_changes(self):
+        from app_bot import ScheduleBot
+
+        self.owner['pending'] = [
+            {'kind': 'daily', 'format': 'card', 'view': 'day', 'date': '2026-11-01'},
+            {'kind': 'daily', 'text': 'Воскресное расписание', 'date': '2026-11-01'},
+            {'kind': 'daily', 'text': 'Старая очередь без даты'},
+            {'kind': 'weekly', 'format': 'card', 'view': 'week', 'date': '2026-10-26'},
+            {'kind': 'refresh', 'format': 'card', 'view': 'week', 'date': '2026-10-26'},
+            {'kind': 'combined_change', 'text': 'Аудитория на понедельник изменена'},
+        ]
+        bot.save_state(self.app.state_file, self.app.state)
+        restored = ScheduleBot(self.root)
+        with patch.object(restored, 'send_profile_message') as send, \
+             patch.object(restored, 'send_profile_card') as send_card:
+            restored.drain('2026-11-01')
+        send_card.assert_not_called()
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[1], 'Аудитория на понедельник изменена')
+        self.assertEqual(restored.profile_for_chat(42)['pending'], [])
+        self.assertEqual(ScheduleBot(self.root).profile_for_chat(42)['pending'], [])
 
 
 if __name__ == '__main__':

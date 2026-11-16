@@ -460,6 +460,65 @@ class MultiBotTests(unittest.TestCase):
                 self.assertEqual(len(profile["pending"]), 1)
                 self.assertEqual(profile["pending"][0]["kind"], "daily")
 
+    def test_sunday_has_no_daily_delivery_and_monday_resumes_day_and_week(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",
+                                       "VK_COMMUNITY_TOKEN": "test-vk", "VK_PEER_ID": "123"}, clear=True):
+            app = MultiBot(Path(temp))
+            telegram = app.new_profile("telegram", 42)
+            vk = app.state["profiles"]["vk"]
+            app.state["profiles"]["telegram:42"] = telegram
+            for profile in (telegram, vk):
+                profile.update({"snapshot": {}, "daily_time": "09:15"})
+                app.queue_profile_card(profile, "day", "2026-11-22", "daily")
+                self.assertEqual(profile["pending"], [])
+            zone = ZoneInfo("Europe/Moscow")
+            self.assertFalse(app.queue_due(datetime(2026, 11, 22, 23, 59, tzinfo=zone)))
+            self.assertTrue(all(not profile["pending"] for profile in (telegram, vk)))
+            self.assertFalse(app.queue_due(datetime(2026, 11, 23, 9, 14, tzinfo=zone)))
+            self.assertTrue(app.queue_due(datetime(2026, 11, 23, 9, 15, tzinfo=zone)))
+            self.assertFalse(app.queue_due(datetime(2026, 11, 23, 9, 16, tzinfo=zone)))
+            for profile in (telegram, vk):
+                self.assertEqual([(item["kind"], item["date"]) for item in profile["pending"]],
+                                 [("daily", "2026-11-23"), ("weekly", "2026-11-23")])
+
+    def test_restart_discards_sunday_daily_and_expired_week_but_keeps_change_alert(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            root = Path(temp)
+            app = MultiBot(root)
+            profile = app.new_profile("telegram", 42)
+            profile["pending"] = [
+                {"kind": "daily", "view": "day", "format": "card", "date": "2026-11-22"},
+                {"kind": "daily", "date": "2026-11-22", "text": "Старое воскресное сообщение"},
+                {"kind": "weekly", "view": "week", "format": "card", "date": "2026-11-16"},
+                {"kind": "change", "text": "Изменение аудитории в понедельник"},
+            ]
+            app.state["profiles"]["telegram:42"] = profile
+            app.state_file.write_text(json.dumps(app.state), encoding="utf-8")
+            restored = MultiBot(root)
+            with patch.object(restored, "send_profile_card") as card, \
+                 patch.object(restored, "send_profile_message") as message:
+                restored.drain("2026-11-22")
+            card.assert_not_called()
+            self.assertEqual(message.call_count, 1)
+            self.assertEqual(message.call_args.args[1], "Изменение аудитории в понедельник")
+            self.assertEqual(restored.profile_for_chat(42)["pending"], [])
+            self.assertEqual(MultiBot(root).profile_for_chat(42)["pending"], [])
+
+    def test_sunday_day_card_remains_available_on_manual_request(self):
+        with TemporaryDirectory() as temp, \
+             patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token"}, clear=True):
+            app = MultiBot(Path(temp))
+            profile = app.new_profile("telegram", 42)
+            profile["snapshot"] = {}
+            app.state["profiles"]["telegram:42"] = profile
+            with patch.object(app, "render_profile_card", return_value=b"png"), \
+                 patch.object(app, "send_telegram_card", return_value=10) as card:
+                app.send_profile_card(profile, "day", "2026-11-22")
+            self.assertEqual(card.call_count, 1)
+            self.assertIn("22.11.2026", card.call_args.args[2])
+
     def test_future_changes_are_queued_separately_for_each_group(self):
         with TemporaryDirectory() as temp:
             with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test-token",

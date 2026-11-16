@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import secrets
+import unicodedata
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -12,8 +14,23 @@ import bot as core
 
 
 MAX_WATCHED_GROUPS = 10
+SUBJECTS_PER_PAGE = 6
 PERSONAL_FIELDS = ("daily_time", "week_layout", "seasonal_theme", "alert_types", "display_format",
-                   "send_schedule_on_change")
+                   "send_schedule_on_change", "muted_subjects")
+
+
+def notification_subject(item):
+    """Lesson types share a switch; military timetable labels form one family."""
+    name = " ".join(unicodedata.normalize("NFKC", core.subject_and_type(item)[0]).split())
+    key = name.casefold().replace("ё", "е")
+    if re.match(r"^военная кафедра\b", key):
+        return "военная кафедра", "Военная кафедра"
+    return key, name
+
+
+def subject_token(key):
+    # Full subject names can exceed Telegram's 64-byte callback_data limit.
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
 
 class WatchGroupsMixin:
@@ -29,6 +46,7 @@ class WatchGroupsMixin:
         profile.setdefault("watched_groups", {})
         profile.setdefault("send_schedule_on_change", False)
         profile.setdefault("pending_group_changes", {})
+        profile.setdefault("muted_subjects", {})
 
     def new_profile(self, *args, **kwargs):
         profile = super().new_profile(*args, **kwargs)
@@ -71,7 +89,72 @@ class WatchGroupsMixin:
             {"text": f"👥 Несколько групп · {enabled}", "callback_data": "watch:settings"}])
         markup["inline_keyboard"].append([
             {"text": f"🖼 Карточки при изменениях · {cards}", "callback_data": "settings:change_cards"}])
+        muted = len(profile["muted_subjects"])
+        markup["inline_keyboard"].append([
+            {"text": f"🔔 Уведомления по предметам · отключено {muted}",
+             "callback_data": "subjects:settings"}])
         return message, markup
+
+    def notification_subjects(self, owner):
+        """Keep muted subjects selectable even after they disappear from snapshots."""
+        self._watch_defaults(owner)
+        subjects = dict(owner["muted_subjects"])
+        for profile in self.monitored_schedules(owner):
+            for item in (profile.get("snapshot") or {}).values():
+                key, name = notification_subject(item)
+                subjects.setdefault(key, name)
+        return sorted(subjects.items(), key=lambda item: item[0])
+
+    def subject_change_allowed(self, owner, before, after):
+        muted = owner.get("muted_subjects", {})
+        return not any(notification_subject(item)[0] in muted
+                       for item in (before, after) if item)
+
+    def subject_settings_view(self, owner, page=0):
+        subjects = self.notification_subjects(owner)
+        pages = max(1, (len(subjects) + SUBJECTS_PER_PAGE - 1) // SUBJECTS_PER_PAGE)
+        page = max(0, min(page, pages - 1))
+        text = ("🔔 Уведомления по предметам\n\n"
+                "Нажмите на предмет, чтобы включить или выключить оповещения о его изменениях.\n"
+                "🔔 — включены · 🔕 — выключены\n\n"
+                "Выбор действует для всех ваших отслеживаемых групп. Лекции, практики и лабораторные "
+                "одного предмета переключаются вместе; все варианты военной кафедры — тоже. "
+                "Предметы остаются в расписании, а отправленные карточки продолжают обновляться. "
+                "Настройка действует для новых проверок расписания.")
+        rows = []
+        for index, (key, name) in enumerate(subjects[page * SUBJECTS_PER_PAGE:(page + 1) * SUBJECTS_PER_PAGE],
+                                           start=page * SUBJECTS_PER_PAGE + 1):
+            icon = "🔕" if key in owner["muted_subjects"] else "🔔"
+            text += f"\n\n{index}. {name[:300]} · {'выключены' if icon == '🔕' else 'включены'}"
+            label = name if len(name) <= 46 else name[:43] + "…"
+            rows.append([{"text": f"{icon} {index}. {label}",
+                          "callback_data": f"subjects:toggle:{subject_token(key)}:{page}"}])
+        if not subjects:
+            text += "\n\nПредметы появятся здесь после загрузки расписания."
+        if pages > 1:
+            text += f"\n\nСтраница {page + 1} из {pages}"
+            arrows = []
+            if page:
+                arrows.append({"text": "◀️ Назад", "callback_data": f"subjects:page:{page - 1}"})
+            if page + 1 < pages:
+                arrows.append({"text": "Далее ▶️", "callback_data": f"subjects:page:{page + 1}"})
+            rows.append(arrows)
+        rows.append([{"text": "⬅️ К настройкам", "callback_data": "settings:back"}])
+        return text, {"inline_keyboard": rows}
+
+    def show_subject_settings(self, owner, message_id=None, page=0):
+        text, markup = self.subject_settings_view(owner, page)
+        params = {"chat_id": owner["chat_id"], "text": text,
+                  "reply_markup": json.dumps(markup, ensure_ascii=False)}
+        if message_id:
+            params["message_id"] = message_id
+        response = core.request_json(
+            f"https://api.telegram.org/bot{self.telegram_token}/{'editMessageText' if message_id else 'sendMessage'}",
+            params, method="POST")
+        if not response.get("ok") and "message is not modified" not in str(response.get("description", "")):
+            if message_id:
+                return self.show_subject_settings(owner, page=page)
+            raise RuntimeError("Не удалось показать настройки предметов")
 
     def show_watch_settings(self, owner, message_id=None):
         self._watch_defaults(owner)
@@ -106,6 +189,35 @@ class WatchGroupsMixin:
     def handle_profile_callback(self, profile, callback):
         action = str(callback.get("data") or "")
         message_id = (callback.get("message") or {}).get("message_id")
+        if action.startswith("subjects:"):
+            owner = self.owner_profile(profile)
+            self._watch_defaults(owner)
+            page = 0
+            page_match = re.fullmatch(r"subjects:page:(\d{1,5})", action)
+            toggle_match = re.fullmatch(r"subjects:toggle:([a-f0-9]{16}):(\d{1,5})", action)
+            if page_match:
+                page = int(page_match[1])
+            elif toggle_match:
+                page = int(toggle_match[2])
+                subject = next(((key, name) for key, name in self.notification_subjects(owner)
+                                if subject_token(key) == toggle_match[1]), None)
+                if subject is None:
+                    self.answer_callback(callback["id"], "Список предметов обновился")
+                    self.show_subject_settings(owner, message_id, page)
+                    return
+                key, name = subject
+                if key in owner["muted_subjects"]:
+                    del owner["muted_subjects"][key]
+                else:
+                    owner["muted_subjects"][key] = name
+                self.monitored_schedules(owner)
+                core.save_state(self.state_file, self.state)
+            elif action != "subjects:settings":
+                self.answer_callback(callback["id"], "Кнопка устарела")
+                return
+            self.answer_callback(callback["id"])
+            self.show_subject_settings(owner, message_id, page)
+            return
         if action == "settings:change_cards":
             self.answer_callback(callback["id"])
             profile["send_schedule_on_change"] = not profile.get("send_schedule_on_change", False)
@@ -236,11 +348,13 @@ class WatchGroupsMixin:
         self._watch_defaults(owner)
         if old is not None:
             alerts = core.profile_alert_types(owner)
-            message = core.changes_message(old, snapshot, today, profile["group_name"], alerts)
+            change_filter = lambda before, after: self.subject_change_allowed(owner, before, after)
+            message = core.changes_message(old, snapshot, today, profile["group_name"], alerts,
+                                           change_filter=change_filter)
             if message:
                 # Include today's changes in the same saved week marker structure.
                 since = (now.date() - timedelta(days=1)).isoformat()
-                weeks = core.future_change_weeks(old, snapshot, since, alerts)
+                weeks = core.future_change_weeks(old, snapshot, since, alerts, change_filter=change_filter)
                 owner["pending_group_changes"][str(profile["group_id"])] = {
                     "group_id": profile["group_id"], "group_name": profile["group_name"],
                     "text": message, "weeks": weeks,
@@ -336,9 +450,11 @@ class WatchGroupsMixin:
             while pending:
                 item = pending[0]
                 view, date = item.get("view"), item.get("date", "")
-                expired = ((item["kind"] in ("daily", "refresh") and view == "day" and date < today)
+                expired = ((item["kind"] == "daily"
+                            and datetime.fromisoformat(date or today).weekday() == 6)
+                           or (item["kind"] in ("daily", "refresh") and view == "day" and date < today)
                            or (item["kind"] in ("weekly", "refresh") and view == "week"
-                               and (datetime.fromisoformat(date) + timedelta(days=6)).date().isoformat() < today)
+                               and (datetime.fromisoformat(date) + timedelta(days=5)).date().isoformat() < today)
                            or (item["kind"] == "refresh" and view == "month" and date[:7] < today[:7]))
                 if expired:
                     pending.pop(0)

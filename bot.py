@@ -13,6 +13,7 @@ import signal
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -558,9 +559,12 @@ def list_week_card(snapshot: dict[str, dict], monday: str, group_name: str,
 
 
 def future_change_weeks(old: dict[str, dict], new: dict[str, dict], today: str,
-                        alert_types: set[str] | None = None) -> dict[str, dict]:
+                        alert_types: set[str] | None = None,
+                        change_filter: Callable[[dict | None, dict | None], bool] | None = None) -> dict[str, dict]:
     weeks: dict[str, dict] = {}
     for before, after in schedule_changes(old, new):
+        if change_filter is not None and not change_filter(before, after):
+            continue
         if not allowed_change(before, after, alert_types):
             continue
         if after and lesson_date(after) > today:
@@ -674,10 +678,13 @@ def change_value(field: str, value: object) -> str:
 
 
 def changes_message(old: dict[str, dict], new: dict[str, dict], today: str,
-                    group_name: str, alert_types: set[str] | None = None) -> str:
+                    group_name: str, alert_types: set[str] | None = None,
+                    change_filter: Callable[[dict | None, dict | None], bool] | None = None) -> str:
     lines = []
     enabled = alert_types if alert_types is not None else set(DEFAULT_ALERT_TYPES)
     for before, after in schedule_changes(old, new):
+        if change_filter is not None and not change_filter(before, after):
+            continue
         if max(lesson_date(x) for x in (before, after) if x) < today:
             continue
         if not allowed_change(before, after, enabled):
@@ -1012,6 +1019,8 @@ class Bot:
             })
 
     def queue_daily(self, channel: str, date: str) -> None:
+        if datetime.fromisoformat(date).weekday() == 6:
+            return
         self.state["pending"][channel].append({"kind": "daily", "view": "day", "date": date, "format": "card"})
 
     def queue_weekly(self, channel: str, monday: str) -> None:
@@ -1028,11 +1037,13 @@ class Bot:
             pending = self.state["pending"][channel]
             while pending:
                 item = pending[0]
+                skip_sunday = (item["kind"] == "daily"
+                               and datetime.fromisoformat(item.get("date") or today).weekday() == 6)
                 expired = ((item["kind"] in ("daily", "refresh") and item.get("view", "day") == "day"
                             and item["date"] < today)
                            or (item["kind"] in ("weekly", "refresh") and item.get("view") == "week"
-                               and (datetime.fromisoformat(item["date"]) + timedelta(days=6)).date().isoformat() < today))
-                if expired:
+                               and (datetime.fromisoformat(item["date"]) + timedelta(days=5)).date().isoformat() < today))
+                if skip_sunday or expired:
                     pending.pop(0)
                     save_state(self.state_file, self.state)
                     continue
@@ -1234,7 +1245,7 @@ class Bot:
             else:
                 LOG.info("Первый снимок расписания сохранён (%d занятий)", len(snapshot))
             self.state["snapshot"] = snapshot
-            if now.strftime("%H:%M") >= self.daily_time:
+            if now.weekday() != 6 and now.strftime("%H:%M") >= self.daily_time:
                 for channel in self.channels():
                     needs_migration = (not self.state["card_tracking_ready"]
                                        and self.state["daily_queued"].get(channel) == today
@@ -1790,6 +1801,8 @@ class MultiBot(Bot):
 
     @staticmethod
     def queue_profile_card(profile: dict, view: str, date: str, kind: str) -> None:
+        if kind == "daily" and datetime.fromisoformat(date).weekday() == 6:
+            return
         if kind == "refresh" and any(item.get("kind") == "refresh" and item.get("view") == view
                                      and item.get("date") == date for item in profile["pending"]):
             return
@@ -1802,10 +1815,12 @@ class MultiBot(Bot):
                 item = pending[0]
                 view = item.get("view")
                 date = item.get("date", "")
+                skip_sunday = (item["kind"] == "daily"
+                               and datetime.fromisoformat(date or today).weekday() == 6)
                 expired = ((item["kind"] in ("daily", "refresh") and view == "day" and date < today)
                            or (item["kind"] in ("weekly", "refresh") and view == "week"
-                               and (datetime.fromisoformat(date) + timedelta(days=6)).date().isoformat() < today))
-                if expired:
+                               and (datetime.fromisoformat(date) + timedelta(days=5)).date().isoformat() < today))
+                if skip_sunday or expired:
                     pending.pop(0)
                     save_state(self.state_file, self.state)
                     continue
@@ -1871,6 +1886,8 @@ class MultiBot(Bot):
                         "last_fetch_failed": False})
 
     def queue_due(self, now: datetime) -> bool:
+        if now.weekday() == 6:
+            return False
         today = now.date().isoformat()
         changed = False
         for profile in self.active_profiles():
