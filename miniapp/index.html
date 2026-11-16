@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f5f5f3">
+  <title>Расписание ДГТУ</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="app" class="app" data-season="classic">
+    <main id="view" aria-live="polite" aria-busy="true">
+      <div class="notice"><h1>Расписание ДГТУ</h1><p>Загрузка…</p></div>
+    </main>
+    <nav id="navigation" class="navigation" aria-label="Разделы" hidden>
+      <button type="button" data-page="schedule"><span class="nav-symbol" aria-hidden="true">▦</span>Расписание</button>
+      <button type="button" data-page="changes"><span class="nav-symbol" aria-hidden="true">↺</span>Изменения</button>
+      <button type="button" data-page="settings"><span class="nav-symbol" aria-hidden="true">☷</span>Настройки</button>
+    </nav>
+    <div id="status" class="status-message" role="status" hidden></div>
+  </div>
+</body>
+</html>

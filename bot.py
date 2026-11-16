@@ -1936,6 +1936,9 @@ class MultiBot(Bot):
             return
         checked_at = datetime.now(MOSCOW)
         for profile in profiles:
+            # Hooks (including the durable lesson journal) need the confirmed
+            # current group ID, not yesterday's directory ID.
+            profile["group_id"] = group_id
             self.process_profile_snapshot(profile, snapshot, checked_at)
             profile.update({"group_id": group_id, "group_checked_on": today,
                             "last_fetch_attempt_at": attempted_at})
@@ -2127,6 +2130,7 @@ def main() -> int:
         return 2
     LOG.info("Бот запущен: %d подписчиков, проверка каждые %d секунд",
              len(bot.state["profiles"]), bot.interval)
+    bot.start_miniapp()
     while not STOP:
         bot.cycle()
         deadline = time.monotonic() + bot.interval
@@ -2144,6 +2148,7 @@ def main() -> int:
             bot.drain(today)
             pause = (0.2 if poll_ok else 2) if bot.telegram_token else 1
             time.sleep(min(pause, max(0, deadline - time.monotonic())))
+    bot.stop_miniapp()
     LOG.info("Бот остановлен")
     return 0
 

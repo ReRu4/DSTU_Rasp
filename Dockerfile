@@ -8,4 +8,6 @@ COPY card.py /app/card.py
 COPY horizontal_card.py /app/horizontal_card.py
 COPY list_card.py /app/list_card.py
 COPY app_bot.py navigation.py watch_groups.py month_card.py /app/
+COPY history_store.py teacher_api.py miniapp_bot.py miniapp_server.py /app/
+COPY miniapp /app/miniapp
 CMD ["python", "-u", "bot.py"]

@@ -1,9 +1,12 @@
 """Бот с календарём, компактной навигацией и подпиской на несколько групп."""
 from __future__ import annotations
 
+import os
+
 from bot import MultiBot, save_state, KEYBOARD_VERSION, LOG
 from navigation import NavigationMixin
 from watch_groups import WatchGroupsMixin
+from miniapp_bot import MiniAppMixin
 
 
 RELEASE_VERSION = "2026-11-subject-alerts-v1"
@@ -16,27 +19,42 @@ RELEASE_TEXT = (
     "Рассылка возобновляется в понедельник в выбранное вами время."
 )
 
+MINIAPP_RELEASE_VERSION = "2026-11-miniapp-v1"
+MINIAPP_RELEASE_TEXT = (
+    "В боте появилось Mini App с расписанием ДГТУ.\n\n"
+    "Откройте его через меню «Расписание» или кнопку в настройках бота. "
+    "Есть день, неделя, месяц, отдельные блоки групп и переход к расписанию преподавателя с фото.\n\n"
+    "Двойное нажатие по паре открывает историю изменений. "
+    "Журнал ведётся с момента установки обновления; старые события задним числом не восстанавливаются.\n\n"
+    "Все привычные кнопки, команды и уведомления в чате продолжают работать."
+)
 
-class ScheduleBot(NavigationMixin, WatchGroupsMixin, MultiBot):
+
+class ScheduleBot(MiniAppMixin, NavigationMixin, WatchGroupsMixin, MultiBot):
     def new_profile(self, channel: str, chat_id: int | None = None, legacy: bool = False) -> dict:
         profile = super().new_profile(channel, chat_id, legacy)
         # Новые пользователи сразу видят новый интерфейс. Перенесённые получают анонс.
         if not legacy:
-            profile["last_release_notified"] = RELEASE_VERSION
+            profile["last_release_notified"] = (MINIAPP_RELEASE_VERSION if os.getenv("MINIAPP_URL", "").strip()
+                                                 else RELEASE_VERSION)
         return profile
 
     def queue_release_notifications(self) -> bool:
+        if self.miniapp_url and not self._miniapp_ready:
+            return False
         changed = False
+        version = MINIAPP_RELEASE_VERSION if self.miniapp_url else RELEASE_VERSION
+        text = MINIAPP_RELEASE_TEXT if self.miniapp_url else RELEASE_TEXT
         for profile in self.active_profiles():
             if (profile.get("channel") != "telegram" or profile.get("owner_chat_id")
                     or profile.get("onboarding") or not profile.get("group_name")
-                    or profile.get("last_release_notified") == RELEASE_VERSION):
+                    or profile.get("last_release_notified") == version):
                 continue
-            if any(item.get("kind") == "release" and item.get("release_version") == RELEASE_VERSION
+            if any(item.get("kind") == "release" and item.get("release_version") == version
                    for item in profile["pending"]):
                 continue
-            profile["pending"].insert(0, {"kind": "release", "text": RELEASE_TEXT,
-                                          "release_version": RELEASE_VERSION})
+            profile["pending"].insert(0, {"kind": "release", "text": text,
+                                          "release_version": version})
             changed = True
         if changed:
             save_state(self.state_file, self.state)
