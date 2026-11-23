@@ -102,6 +102,65 @@ Mini App — дополнительный интерфейс с реальным
 [API поиска ДГТУ](https://edu.donstu.ru/api/search?searchQuery=Савельев),
 [пример расписания преподавателя](https://edu.donstu.ru/api/Rasp?idTeacher=3704).
 
+#### Существующий shared-caddy в Docker и домен norbix.ru
+
+На сервере из чата «Изучить проект и Caddy» работает общий контейнер
+`shared-caddy`. Его `/etc/caddy/Caddyfile` импортирует
+`/etc/caddy/sites/*.caddy`, а приложения доступны через адрес хоста на `docker0`
+`172.17.0.1`. Это схема из предыдущей диагностики; перед применением проверьте
+текущие адрес и монтирование каталога:
+
+```bash
+ip -4 addr show docker0
+docker inspect shared-caddy --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+docker exec shared-caddy cat /etc/caddy/Caddyfile
+```
+
+Если `/etc/caddy` на хосте смонтирован в `/etc/caddy` контейнера и адрес docker0
+остался `172.17.0.1`, в `.env` бота задайте:
+
+```dotenv
+MINIAPP_URL=https://norbix.ru
+MINIAPP_BIND_IP=172.17.0.1
+MINIAPP_PORT=8080
+```
+
+`MINIAPP_HOST` внутри контейнера уже задаёт Compose. При публикации только на
+`127.0.0.1` другой контейнер не сможет обращаться к этому порту через docker0.
+Если каталог сайтов смонтирован с другого пути хоста, используйте именно этот
+путь при копировании файла ниже.
+
+Из каталога проекта после обновления кода и `.env`:
+
+```bash
+docker compose up -d --build bot
+curl -fsS http://172.17.0.1:8080/healthz
+```
+
+Сохраните копию существующего файла сайта, если он уже создан, затем установите
+только новый сайт. Общий Caddyfile и конфигурации других приложений не заменяются:
+
+```bash
+sudo mkdir -p /etc/caddy/sites
+if [ -f /etc/caddy/sites/norbix.ru.caddy ]; then
+    sudo cp -p /etc/caddy/sites/norbix.ru.caddy "/etc/caddy/sites/norbix.ru.caddy.bak-$(date +%Y%m%d-%H%M%S)"
+fi
+sudo cp deploy/caddy/norbix.ru.caddy /etc/caddy/sites/norbix.ru.caddy
+docker exec shared-caddy caddy validate --config /etc/caddy/Caddyfile
+```
+
+При успешной проверке примените конфигурацию и проверьте HTTPS:
+
+```bash
+docker exec shared-caddy caddy reload --config /etc/caddy/Caddyfile
+curl -fsS https://norbix.ru/healthz
+```
+
+Health endpoint должен вернуть `{"ok":true}`. Caddy получает сертификат
+автоматически при доступных портах 80/443 и корректных DNS-записях. `www` к этому
+сайту автоматически не добавляется. Если проверка не прошла, сначала исправьте
+ошибку в конфигурации; работающая конфигурация продолжает действовать до reload.
+
 Нужен Python 3.11+ и постоянно работающий компьютер или сервер.
 
 ```powershell

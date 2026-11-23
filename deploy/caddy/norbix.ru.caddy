@@ -1,0 +1,7 @@
+# Отдельный сайт для существующего shared-caddy, который импортирует
+# /etc/caddy/sites/*.caddy. На хосте Mini App публикуется на docker0:
+# MINIAPP_BIND_IP=172.17.0.1, MINIAPP_PORT=8080.
+norbix.ru {
+    encode zstd gzip
+    reverse_proxy 172.17.0.1:8080
+}

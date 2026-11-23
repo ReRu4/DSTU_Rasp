@@ -1,5 +1,6 @@
 # Замените rasp.example.ru вашим доменом; DNS A/AAAA должны указывать на сервер.
 # Этот файл для Caddy на хосте, где Docker публикует локальный порт 8080.
+# Для существующего shared-caddy в Docker см. deploy/caddy/norbix.ru.caddy и README.
 rasp.example.ru {
     encode zstd gzip
     reverse_proxy 127.0.0.1:8080
