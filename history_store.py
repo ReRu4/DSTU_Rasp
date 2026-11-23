@@ -284,16 +284,27 @@ class HistoryStore:
             return [self._decode_event(row) for row in db.execute(
                 "SELECT * FROM schedule_events WHERE lesson_id=? ORDER BY id DESC", (str(uid),))]
 
-    def events(self, group_ids, limit=100, offset=0, include_baseline=True):
+    def event_count(self, group_ids, include_baseline=False):
+        ids = sorted({int(group_id) for group_id in group_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as db:
+            return db.execute(f"SELECT COUNT(*) FROM schedule_events WHERE group_id IN ({placeholders})"
+                              + ("" if include_baseline else " AND kind != 'baseline'"), ids).fetchone()[0]
+
+    def events(self, group_ids, limit=100, offset=0, include_baseline=True, before_id=None):
         ids = sorted({int(group_id) for group_id in group_ids})
         if not ids:
             return []
         limit, offset = max(1, min(int(limit), 500)), max(0, int(offset))
         placeholders = ",".join("?" for _ in ids)
+        boundary = int(before_id) if before_id is not None else None
         with self._connect() as db:
             return [self._decode_event(row) for row in db.execute(f"""SELECT e.*,g.group_name
                 FROM schedule_events e JOIN schedule_groups g USING(group_id)
                 WHERE e.group_id IN ({placeholders})"""
                 + ("" if include_baseline else " AND e.kind != 'baseline'")
+                + (" AND e.id < ?" if boundary is not None else "")
                 + " ORDER BY e.id DESC LIMIT ? OFFSET ?",
-                (*ids, limit, offset))]
+                (*ids, *((boundary,) if boundary is not None else ()), limit, offset))]

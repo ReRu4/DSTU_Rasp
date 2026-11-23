@@ -47,6 +47,24 @@ class WatchGroupsMixin:
         profile.setdefault("send_schedule_on_change", False)
         profile.setdefault("pending_group_changes", {})
         profile.setdefault("muted_subjects", {})
+        # Full-word upstream type labels used to remain in both the mute key
+        # and its display name. Migrate only consistent legacy aliases, retaining
+        # opt-outs after recognition; unrelated/custom keys are not rewritten.
+        muted = profile["muted_subjects"]
+        if isinstance(muted, dict):
+            for key, display in list(muted.items()):
+                if not isinstance(key, str) or not isinstance(display, str):
+                    continue
+                normalized = " ".join(unicodedata.normalize("NFKC", display).split())
+                if key != normalized.casefold().replace("ё", "е"):
+                    continue
+                if not re.match(r"^(лекция|практика|практическое\s+занятие|лабораторная(?:\s+работа)?)\s+",
+                                normalized, flags=re.IGNORECASE):
+                    continue
+                canonical, name = notification_subject({"дисциплина": normalized})
+                if canonical != key:
+                    muted.pop(key)
+                    muted.setdefault(canonical, name)
         if profile.get("miniapp_card_style") not in ("stripe", "fill"):
             profile["miniapp_card_style"] = "stripe"
 

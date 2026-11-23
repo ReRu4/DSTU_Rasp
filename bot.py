@@ -337,7 +337,21 @@ def pairs_label(count: int) -> str:
 def subject_and_type(item: dict) -> tuple[str, str]:
     raw = str(item.get("дисциплина") or "Без названия").strip()
     match = re.match(r"^(лек|пр|лаб)\s+(.+)$", raw, flags=re.IGNORECASE)
-    return (match.group(2).strip(), LESSON_TYPES[match.group(1).lower()]) if match else (raw, "Занятие")
+    if match:
+        return match.group(2).strip(), LESSON_TYPES[match.group(1).lower()]
+    # The current DSTU API also uses e.g. "Лекция 1 Военная кафедра ...".
+    # Only full type labels may carry an ordinal; keep names such as
+    # "лек 1 курс" and "Лекция 1С:Предприятие" intact after the type.
+    match = re.match(
+        r"^(лекция|практика|практическое\s+занятие|лабораторная(?:\s+работа)?)"
+        r"\s+(?:(?:№\s*)?\d+\s+)?(.+)$", raw, flags=re.IGNORECASE)
+    if match:
+        aliases = {"лекция": "Лекция", "практика": "Практика",
+                   "практическое занятие": "Практика", "лабораторная": "Лабораторная",
+                   "лабораторная работа": "Лабораторная"}
+        name = " ".join(match.group(1).lower().split())
+        return match.group(2).strip(), aliases[name]
+    return raw, "Занятие"
 
 
 def lesson_details(item: dict) -> list[str]:

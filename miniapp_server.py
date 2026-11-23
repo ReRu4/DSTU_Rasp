@@ -190,6 +190,37 @@ def event_dto(event, record):
     return result
 
 
+def semantic_revision(value):
+    """A content revision: a successful check alone must not redraw the UI."""
+    def clean(item):
+        if isinstance(item, dict):
+            return {key: clean(child) for key, child in item.items()
+                    if key not in {"observed_at", "last_fetch_at", "last_fetch_attempt_at"}}
+        if isinstance(item, list):
+            return [clean(child) for child in item]
+        return item
+    return hashlib.sha256(json.dumps(clean(value), sort_keys=True, ensure_ascii=False,
+                                      separators=(",", ":")).encode()).hexdigest()
+
+
+def schedule_revisions(lessons, groups, start, end):
+    context = [{key: group[key] for key in ("id", "name", "primary", "enabled") if key in group}
+               for group in groups]
+    context.sort(key=lambda group: str(group.get("id", "")))
+    ordered = sorted(lessons, key=lambda item: (item["date"], item["start"], str(item["id"])))
+    by_day = {}
+    for item in ordered:
+        by_day.setdefault(item["date"], []).append(item)
+    revisions = {}
+    current, last = date.fromisoformat(start), date.fromisoformat(end)
+    while current <= last:
+        day = current.isoformat()
+        revisions[day] = semantic_revision({"lessons": by_day.get(day, []), "groups": context})
+        current += timedelta(days=1)
+    return {"revision": semantic_revision({"lessons": ordered, "groups": context}),
+            "day_revisions": revisions}
+
+
 class MiniAppService:
     def __init__(self, state_file, history, queue, token, teachers, *, auth_max_age=86400):
         self.state_file, self.history, self.queue = Path(state_file), history, queue
@@ -250,7 +281,9 @@ class MiniAppService:
             if not sources:
                 raise APIError(403, "group_access", "Эта группа не отслеживается вашим профилем.")
             lessons = [lesson_dto(item) for p in sources for item in self.history.schedule(int(p["group_id"]), start, end)]
+            visible_groups = [g for g in group_info(owner) if any(str(g["id"]) == str(p["group_id"]) for p in sources)]
             return {"lessons": sorted(lessons, key=lambda x: (x["date"], x["start"], x["group_name"], x["id"])),
+                    **schedule_revisions(lessons, visible_groups, start, end),
                     "groups": group_info(owner), "slots": [{"start": a, "end": b} for a, b in core.PAIR_SLOTS],
                     "freshness": [{"group_id": p["group_id"], "last_fetch_at": p.get("last_fetch_at") or None,
                                    "last_fetch_failed": bool(p.get("last_fetch_failed")),
@@ -262,11 +295,18 @@ class MiniAppService:
             try:
                 limit = min(100, max(1, int(params.get("limit", 50))))
                 offset = max(0, int(params.get("offset", 0)))
+                before_id = int(params["before_id"]) if "before_id" in params else None
                 if offset > 100000:
                     raise ValueError
+                if before_id is not None:
+                    if not 0 < before_id < 2**63:
+                        raise ValueError
+                    offset = 0
             except ValueError:
                 raise APIError(400, "pagination", "Неверная страница истории.") from None
-            events = self.history.events([int(p["group_id"]) for p in schedules(owner)], limit=limit + 1, offset=offset, include_baseline=False)
+            group_ids = [int(p["group_id"]) for p in schedules(owner)]
+            events = self.history.events(group_ids, limit=limit + 1, offset=offset,
+                                         include_baseline=False, before_id=before_id)
             result = []
             for event in events[:limit]:
                 if event.get("kind") == "baseline":
@@ -274,7 +314,10 @@ class MiniAppService:
                 record = self.history.lesson(event["lesson_id"])
                 if record:
                     result.append(event_dto(event, record))
-            return {"events": result, "next_offset": offset + limit if len(events) > limit else None}
+            return {"events": result, "revision": semantic_revision(result),
+                    "total_events": self.history.event_count(group_ids),
+                    "next_cursor": result[-1]["id"] if len(events) > limit and result else None,
+                    "next_offset": offset + limit if len(events) > limit else None}
         if method == "GET" and path == "/api/teacher":
             record = self.allowed_lesson(params.get("lesson_id", ""), owner)
             start, end = self.bounds(params)
@@ -292,12 +335,15 @@ class MiniAppService:
             lessons = []
             for code, raw in result["snapshot"].items():
                 if start <= core.lesson_date(raw) <= end:
-                    lessons.append(lesson_dto({"id": "teacher-" + str(code), "group_id": 0,
+                    stable_id = "teacher-" + str(chosen["id"]) + "-" + semantic_revision(
+                        {key: value for key, value in raw.items() if key != "код"})[:24]
+                    lessons.append(lesson_dto({"id": stable_id, "group_id": 0,
                                               "group_name": raw.get("group_name") or raw.get("группа") or "",
                                               "lesson": raw, "deleted": False, "observed_at": result.get("fetched_at")}))
                     lessons[-1]["history_available"] = False
             return {"teacher": result["teacher"], "candidates": candidates,
                     "lessons": sorted(lessons, key=lambda x: (x["date"], x["start"], x["group_name"])),
+                    **schedule_revisions(lessons, [], start, end),
                     "freshness": {"last_fetch_at": result.get("fetched_at"), "has_snapshot": True,
                                   "last_fetch_failed": bool(result.get("last_fetch_failed"))}}
         if method == "GET" and re.fullmatch(r"/api/jobs/[a-f0-9]{32}", path):

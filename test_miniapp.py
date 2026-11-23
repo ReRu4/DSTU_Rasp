@@ -15,7 +15,7 @@ from urllib.parse import urlencode
 import bot
 from app_bot import ScheduleBot
 from miniapp_server import (APIError, CommandQueue, LimitedHTTPServer, MiniAppService,
-                            make_handler, validate_command, validate_init_data)
+                            make_handler, validate_command, validate_init_data, lesson_dto)
 from test_bot import lesson
 
 
@@ -32,6 +32,14 @@ def signed(user_id=42, stamp=None, **extra):
 
 
 class AuthTests(unittest.TestCase):
+    def test_upstream_full_lecture_label_has_military_and_lecture_dto(self):
+        raw = {**lesson(), 'дисциплина': 'Лекция 1 Военная кафедра (ЦВПР с.запаса чт)'}
+        payload = lesson_dto({'id': 'military-test', 'group_id': 72244, 'group_name': 'ВКБ51',
+                              'lesson': raw, 'deleted': False})
+        self.assertEqual(payload['type'], 'lec')
+        self.assertTrue(payload['military'])
+        self.assertEqual(payload['subject'], 'Военная кафедра (ЦВПР с.запаса чт)')
+
     def test_auth_signature_tampering_age_and_duplicate_fields(self):
         self.assertEqual(validate_init_data(signed(), TOKEN), 42)
         self.assertEqual(validate_init_data(signed(signature='signed-by-telegram'), TOKEN), 42)
@@ -107,6 +115,20 @@ class MiniAppTests(unittest.TestCase):
         self.assertEqual(response['lessons'][0]['id'], self.uid)
         self.assertEqual(len(response['slots']), 7)
         self.assertEqual(len(self.dispatch('/api/changes')['events']), 1)
+
+    def test_legacy_full_type_mutes_have_one_disabled_bootstrap_subject_each(self):
+        labels = ['Лекция 1 Военная кафедра (ЦВПР с.запаса чт)', 'Лекция 2 Алгебра']
+        self.owner['snapshot'] = {str(i): {**self.raw, 'код': str(i), 'дисциплина': label}
+                                  for i, label in enumerate(labels, 1)}
+        self.owner['muted_subjects'] = {label.casefold(): label for label in labels}
+        self.persist()
+        restarted = ScheduleBot(self.root)
+        bootstrap = self.dispatch('/api/bootstrap')
+        self.assertEqual(bootstrap['subjects'], [
+            {'key': 'алгебра', 'name': 'Алгебра', 'enabled': False},
+            {'key': 'военная кафедра', 'name': 'Военная кафедра', 'enabled': False}])
+        self.assertEqual(restarted.profile_for_chat(42)['muted_subjects'],
+                         {'алгебра': 'Алгебра', 'военная кафедра': 'Военная кафедра'})
 
     def test_saved_schedule_survives_upstream_failure(self):
         with patch('bot.fetch_schedule', side_effect=RuntimeError('offline')), patch('bot.find_group_id', return_value=self.owner['group_id']):

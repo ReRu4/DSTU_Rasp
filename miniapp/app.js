@@ -14,13 +14,16 @@
   const seasons = {autumn:'Осень',winter:'Зима',spring:'Весна',summer:'Лето',classic:'Без сезона'};
   const state = {
     page:'schedule', mode:'day', date:'', group:'', bootstrap:null, schedule:null,
-    detail:null, teacher:null, teacherChoice:'', events:[], nextOffset:null,
+    detail:null, teacher:null, teacherChoice:'', events:[], nextOffset:null, nextCursor:null, totalEvents:null,
     returnPage:'schedule', lessonId:'', detailTab:'details', sourceDetail:null, localDetail:false, busy:false, error:null,
-    settingsTab:'general', settingsOpen:{delivery:true}, groupDrafts:{primary:'',add:''}, settingsFocus:null
+    settingsTab:'general', settingsOpen:{delivery:true}, groupDrafts:{primary:'',add:''}, settingsFocus:null, feedRevision:null, feedLoadedOlder:false,
+    monthDays:{}
   };
   let requestVersion=0, tapTimer=null, lastTap=null, statusTimer=null, syncing=false;
   const scheduleCache=new Map();
   let rosterVersion='', cacheEpoch=0, gesture=null, suppressClickUntil=0, pageMotion=null;
+  let scheduleShell=null, feedShell=null;
+  const scrollPositions=new Map();
   function clearScheduleCache() {scheduleCache.clear();cacheEpoch++;}
   const esc = value => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const attr = esc;
@@ -136,6 +139,10 @@
     const start=monday(state.date);
     return Array.from({length:6},(_,i)=>shiftDay(start,i));
   }
+  function teacherAgenda(list) {
+    if(!list.length) return '<div class="empty">Нет занятий</div>';
+    return `<div class="agenda">${[...list].sort((a,b)=>a.start.localeCompare(b.start)||String(a.group_name||'').localeCompare(String(b.group_name||''))).map(item=>`<div><p class="meta teacher-group-label">${esc(item.group_name)}</p>${lessonCard(item)}</div>`).join('')}</div>`;
+  }
   function scheduleBody(lessons,teacher=false) {
     if(state.mode==='month') return monthCalendar(lessons);
     return `<div class="${state.mode==='week'?'week-days':''}">${daysForMode().map(date=>{
@@ -144,7 +151,7 @@
       return `<section class="day-section"><div class="heading"><h2>${esc(fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date))}</h2></div>${groups.map((group,index)=>{
         const filtered=teacher?dayLessons:dayLessons.filter(item=>String(item.group_id)===String(group.id));
         if(!teacher && state.group==='all') return groupBlock(group,filtered,index===0,date);
-        if(teacher) return `<div class="agenda">${filtered.length?filtered.sort((a,b)=>a.start.localeCompare(b.start)).map(item=>`<div><p class="meta teacher-group-label">${esc(item.group_name)}</p>${lessonCard(item)}</div>`).join(''):'<div class="empty">Нет занятий</div>'}</div>`;
+        if(teacher) return teacherAgenda(filtered);
         return agenda(filtered);
       }).join('')}</section>`;
     }).join('')}</div>`;
@@ -156,26 +163,61 @@
     const meta=active.length?active.every(item=>item.military)?'Военная кафедра':`${active.length} зан. · ${sorted[0].start}–${sorted.at(-1).end}`:'Нет занятий';
     return `<details class="group-block" data-block-key="${attr(group.id+':'+date)}" ${open?'open':''}><summary class="group-summary"><span><strong>${esc(group.name)}</strong><small>${esc(meta)}${changed?' · '+changed+' изм.':''}</small></span></summary><div class="group-body">${agenda(list)}</div></details>`;
   }
-  function subjectShort(value) {
-    const words=String(value).split(/\s+/).filter(Boolean);
-    if(words.length<=2) return value;
-    return words.filter(word=>word.length>2).slice(0,6).map(word=>word[0].toUpperCase()).join('');
+  function occupiedSlots(list) {
+    const slots=new Map();
+    for(const item of list) {
+      if(item.deleted) continue;
+      const key=item.start+'–'+item.end;
+      if(!slots.has(key)) slots.set(key,{start:item.start,end:item.end,kinds:new Set()});
+      slots.get(key).kinds.add(Object.hasOwn(types,item.type)?item.type:'other');
+    }
+    return [...slots.values()].sort((a,b)=>a.start.localeCompare(b.start)||a.end.localeCompare(b.end));
+  }
+  function pairCount(count) {
+    const last=count%10,teen=count%100;
+    return `${count} ${teen>=11&&teen<=14?'пар':last===1?'пара':last>=2&&last<=4?'пары':'пар'}`;
+  }
+  function monthSelectionKey(groupId,date=state.date) {
+    return `${state.page==='teacher'?'teacher-'+(state.teacher?.teacher?.id||''):'group'}:${groupId}:${firstMonth(date)}`;
+  }
+  function monthDetail(group,list,date,teacher=false) {
+    const active=list.filter(item=>!item.deleted),slots=occupiedSlots(active);
+    const military=active.length>0&&active.every(item=>item.military);
+    const start=active.length?active.map(item=>item.start).sort()[0]:'';
+    const end=active.length?active.map(item=>item.end).sort().at(-1):'';
+    const summary=military?'Военная кафедра · весь день':active.length?`${pairCount(slots.length)} · ${start}–${end}`:list.length?'Нет действующих пар · есть удалённые записи':'Нет занятий';
+    const open=`<span class="month-detail-actions"><button type="button" class="text-action" data-month-calendar="${attr(group.id)}">↑ К календарю</button><button type="button" class="text-action" data-open-month-day="${attr(date)}" data-month-group="${attr(group.id)}">Открыть день →</button></span>`;
+    return `<section class="month-day-detail" id="month-detail-${attr(group.id)}" data-month-group="${attr(group.id)}" data-date="${attr(date)}"><div class="month-detail-heading"><h2 class="month-selected-title">${esc(fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date))}</h2>${open}</div><p class="month-day-summary">${esc(summary)}</p>${teacher?teacherAgenda(list):agenda(list)}</section>`;
   }
   function monthCalendar(lessons) {
-    const groups=state.page==='teacher'?[{id:'teacher',name:''}]:state.group==='all'?activeGroups():activeGroups().filter(group=>String(group.id)===state.group);
+    const teacher=state.page==='teacher';
+    const groups=teacher?[{id:'teacher',name:''}]:state.group==='all'?activeGroups():activeGroups().filter(group=>String(group.id)===state.group);
     return groups.map((group,index)=>{
       const filtered=group.id==='teacher'?lessons:lessons.filter(item=>String(item.group_id)===String(group.id));
       const first=firstMonth(state.date),last=lastMonth(state.date);
       const start=monday(safeDay(first)),end=shiftDay(monday(last),5);
       const dates=[];
       for(let date=start;date<=end;date=shiftDay(date,1)) if(parseDate(date).getUTCDay()!==0) dates.push(date);
-      const calendar=`<div class="calendar" aria-label="Расписание на месяц">${weekNames.map(name=>`<span class="calendar-label">${name}</span>`).join('')}${dates.map(date=>{
+      const selectionKey=monthSelectionKey(group.id);
+      let selected=state.monthDays[selectionKey];
+      if(!selected || selected<first || selected>last || parseDate(selected).getUTCDay()===0) {
+        selected=state.date>=first&&state.date<=last&&parseDate(state.date).getUTCDay()!==0?state.date:safeDay(first);
+        state.monthDays[selectionKey]=selected;
+      }
+      const hasMilitary=filtered.some(item=>!item.deleted&&item.military);
+      const hasChanges=filtered.some(item=>item.deleted||statuses[item.status]);
+      const legendTypes=[['lec','Лекция'],['prac','Практика'],['lab','Лабораторная']];
+      if(filtered.some(item=>!item.deleted&&!['lec','prac','lab'].includes(item.type))) legendTypes.push(['other','Другое']);
+      const legend=`<div class="month-legend" aria-label="Обозначения типов занятий">${legendTypes.map(([kind,label])=>`<span><i data-kind="${kind}" aria-hidden="true"></i>${label}</span>`).join('')}${hasChanges?'<span><i class="month-change-key" aria-hidden="true"></i>Изменения</span>':''}</div><p class="month-guide">Нажмите на дату — подробности ниже${hasMilitary?' · ВК — военная кафедра':''}</p>`;
+      const calendar=`${legend}<div class="calendar" data-month-calendar-group="${attr(group.id)}" aria-label="Выберите день месяца">${weekNames.map(name=>`<span class="calendar-label">${name}</span>`).join('')}${dates.map(date=>{
         if(date<first || date>last) return '<span class="calendar-gap" aria-hidden="true"></span>';
-        const day=filtered.filter(item=>item.date===date&&!item.deleted).sort((a,b)=>a.start.localeCompare(b.start));
-        const military=day.length && day.every(item=>item.military);
-        const label=formatDate(date)+', '+(military?'Военная кафедра':day.length?day.map(item=>item.start+' '+item.subject).join(', '):'нет занятий');
-        return `<button type="button" class="calendar-cell" data-month-day="${date}" data-current="${date===state.bootstrap.today}" aria-label="${attr(label)}"><time datetime="${date}">${Number(date.slice(-2))}</time>${military?'<span class="month-item" data-kind="lec">Военная кафедра</span>':day.length?day.slice(0,3).map(item=>`<span class="month-item" data-kind="${attr(item.type)}">${esc(item.start)} ${esc(subjectShort(item.subject))}</span>`).join(''):'<span class="more" aria-hidden="true">—</span>'}${!military && day.length>3?`<span class="more">ещё ${day.length-3}</span>`:''}</button>`;
-      }).join('')}</div>`;
+        const all=filtered.filter(item=>item.date===date),day=all.filter(item=>!item.deleted),slots=occupiedSlots(day);
+        const military=day.length>0&&day.every(item=>item.military);
+        const changed=all.some(item=>item.deleted||statuses[item.status]);
+        const label=fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date)+', '+(military?'Военная кафедра, '+pairCount(slots.length):slots.length?pairCount(slots.length):'нет занятий')+(changed?', есть изменения':'');
+        const marks=slots.slice(0,7).map(slot=>`<span class="month-slot">${[...slot.kinds].map(kind=>`<i data-kind="${kind}"></i>`).join('')}</span>`).join('');
+        return `<button type="button" class="calendar-cell" data-month-day="${date}" data-month-group="${attr(group.id)}" data-count="${slots.length}" data-current="${date===state.bootstrap.today}" aria-pressed="${date===selected}" aria-controls="month-detail-${attr(group.id)}" aria-label="${attr(label)}"><span class="month-cell-date"><time datetime="${date}">${Number(date.slice(-2))}</time>${changed?'<i class="month-change-dot" aria-hidden="true"></i>':''}</span><span class="month-slot-count ${military?'month-military':''}">${military?'ВК':slots.length?pairCount(slots.length):'—'}</span><span class="month-markers" aria-hidden="true">${marks}</span></button>`;
+      }).join('')}</div>${monthDetail(group,filtered.filter(item=>item.date===selected),selected,teacher)}`;
       return state.group==='all' && state.page!=='teacher'?`<details class="group-block" data-block-key="${attr(group.id+':'+firstMonth(state.date))}" ${index===0?'open':''}><summary class="group-summary"><strong>${esc(group.name)}</strong></summary><div class="group-body">${calendar}</div></details>`:calendar;
     }).join('');
   }
@@ -188,7 +230,7 @@
     let body='';
     if(before&&after) body=comparisons.filter(([key])=>String(before[key]??'')!==String(after[key]??'')).map(([key,label])=>`<p>${label}: <span class="diff-old">${esc(before[key]||'—')}</span> → <span class="diff-new">${esc(after[key]||'—')}</span></p>`).join('');
     else body=`<p>${esc(event.kind==='baseline'?'История ведётся с этой проверки':event.kind==='removed'?'Запись исчезла из расписания':'Запись появилась в расписании')}</p>`;
-    return `<div class="event" data-event="${attr(type)}">${link?`<button type="button" class="feed-link" data-history="${attr(event.lesson_id)}"><strong>${esc(title)}</strong><small>${esc(event.group_name)} · ${esc(item?.date?formatDate(item.date):'')} · ${esc(item?.subject||'Занятие')}</small></button>`:`<strong>${esc(title)}</strong>`}<time>${esc(stamp(event.detected_at))} · МСК</time>${body}</div>`;
+    return `<div class="event" data-event="${attr(type)}" data-event-id="${attr(event.id)}">${link?`<button type="button" class="feed-link" data-history="${attr(event.lesson_id)}"><strong>${esc(title)}</strong><small>${esc(event.group_name)} · ${esc(item?.date?formatDate(item.date):'')} · ${esc(item?.subject||'Занятие')}</small></button>`:`<strong>${esc(title)}</strong>`}<time>${esc(stamp(event.detected_at))} · МСК</time>${body}</div>`;
   }
   function historyView(detail) {
     if(state.localDetail) return '<section class="history"><h2>История пары</h2><p class="settings-note">История для этой пары ещё не ведётся. Полный журнал доступен для занятий отслеживаемых групп.</p></section>';
@@ -230,7 +272,138 @@
     const form=element.closest('[data-group-form]');
     return form&&element.matches('input[name="name"]')?`[data-group-form="${form.dataset.groupForm}"] input[name="name"]`:null;
   }
-  function render() {
+  function visibleLesson(item) {
+    return ['id','group_id','group_name','date','start','end','subject','type','teacher','room','subgroup','deleted','military','status','history_count','history_available'].map(key=>item[key]??null);
+  }
+  function scheduleContext() {
+    const period=state.mode==='day'?state.date:state.mode==='month'?firstMonth(state.date):monday(state.date);
+    return JSON.stringify([state.page,state.mode,period,state.group,state.page==='teacher'?(state.teacherChoice||state.detail?.lesson.id||''):'']);
+  }
+  function scheduleRevision(payload) {
+    if(!payload || payload.loading) return 'loading';
+    if(state.page==='teacher'&&!payload.teacher) return JSON.stringify([payload.candidates||[],payload.message]);
+    if(state.mode==='day' && payload.day_revisions?.[state.date]!==undefined) return payload.day_revisions[state.date];
+    if(state.mode!=='day' && payload.revision!==undefined) return payload.revision;
+    return JSON.stringify((payload.lessons||[]).filter(item=>state.mode!=='day'||item.date===state.date).map(visibleLesson));
+  }
+  function panePosition(pane,selector) {
+    const rect=pane.getBoundingClientRect();
+    const first=[...pane.querySelectorAll(selector)].find(item=>item.getBoundingClientRect().bottom>rect.top+1);
+    return {top:pane.scrollTop,left:pane.scrollLeft,anchor:first?(first.dataset.eventId||first.dataset.lesson):null,
+      offset:first?first.getBoundingClientRect().top-rect.top:0};
+  }
+  function restorePanePosition(pane,saved,selector) {
+    if(!saved) return;
+    pane.scrollTop=saved.top;pane.scrollLeft=saved.left;
+    if(saved.anchor) {
+      const anchor=[...pane.querySelectorAll(selector)].find(item=>(item.dataset.eventId||item.dataset.lesson)===saved.anchor);
+      if(anchor) pane.scrollTop+=anchor.getBoundingClientRect().top-pane.getBoundingClientRect().top-saved.offset;
+    }
+  }
+  function releaseScheduleShell() {
+    if(scheduleShell?.context) scrollPositions.set(scheduleShell.context,panePosition(scheduleShell.scroll,'[data-lesson]'));
+    scheduleShell=null;
+  }
+  function setText(element,text) {if(element.textContent!==String(text)) element.textContent=String(text);}
+  function compactScheduleChrome(teacher) {
+    return `<div class="schedule-chrome"><div class="schedule-topline">${teacher?btn('back','detail','‹ К паре','schedule-back'):'<span>ДГТУ · Расписание</span>'}<span class="season-label"></span></div><div class="schedule-toolbar"><div class="schedule-group-control"></div><select aria-label="Период расписания" data-mode><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select></div><div class="schedule-period-row"><button type="button" class="period-arrow" data-shift="-1" aria-label="Предыдущий период">‹</button><details class="date-picker"><summary aria-label="Выбрать дату"><span class="period-title"></span><span aria-hidden="true">⌄</span></summary><label class="date-picker-popup">Перейти к дате<input type="date" aria-label="Дата расписания" data-date></label></details>${btn('today','1','Сегодня','quiet-button')}<button type="button" class="period-arrow" data-shift="1" aria-label="Следующий период">›</button></div>${dateStrip()}<div class="freshness"><span class="freshness-text"></span>${teacher?'':btn('refresh','1','Обновить','text-action')}</div></div>`;
+  }
+  function ensureScheduleShell() {
+    if(scheduleShell?.page===state.page && view.contains(scheduleShell.chrome)) return scheduleShell;
+    releaseScheduleShell();feedShell=null;
+    view.innerHTML=compactScheduleChrome(state.page==='teacher')+`<div class="schedule-scroll">${scheduleViewport('')}</div>`;
+    view.scrollTop=0;
+    scheduleShell={page:state.page,chrome:view.querySelector('.schedule-chrome'),scroll:view.querySelector('.schedule-scroll'),
+      viewport:view.querySelector('.schedule-viewport'),content:view.querySelector('.schedule-content'),context:null,key:null,roster:null};
+    return scheduleShell;
+  }
+  function patchScheduleChrome(shell,options={}) {
+    const chrome=shell.chrome,teacher=state.page==='teacher';
+    setText(chrome.querySelector('.season-label'),seasons[season()]);
+    const groups=activeGroups();
+    const person=state.teacher?.teacher;
+    const roster=teacher?JSON.stringify([person?.id,person?.name,person?.avatar_url,state.detail?.lesson.teacher]):JSON.stringify(groups.map(group=>[group.id,group.name]));
+    if(shell.roster!==roster) {
+      const slot=chrome.querySelector('.schedule-group-control');
+      slot.innerHTML=teacher?`<div class="schedule-person">${avatar(person||{name:state.detail?.lesson.teacher})}<strong>${esc(person?.name||state.detail?.lesson.teacher||'Преподаватель')}</strong></div>`:groups.length>1?`<select aria-label="Группа расписания" data-group>${groups.map(group=>`<option value="${attr(group.id)}">${esc(group.name)}</option>`).join('')}<option value="all">Все группы</option></select>`:`<span class="group-label" role="heading" aria-level="1">${esc(groups[0]?.name||profile().group_name||'')}</span>`;
+      shell.roster=roster;
+    }
+    const groupControl=chrome.querySelector('[data-group]');
+    if(groupControl && groupControl.value!==state.group) groupControl.value=state.group;
+    const modeControl=chrome.querySelector('[data-mode]');
+    if(modeControl.value!==state.mode) modeControl.value=state.mode;
+    const month=formatDate(state.date,{month:'long',year:'numeric'}).replace(/ г\.$/,'');
+    setText(chrome.querySelector('.period-title'),month[0].toLocaleUpperCase('ru-RU')+month.slice(1));
+    const picker=chrome.querySelector('.date-picker'),input=picker.querySelector('[data-date]');
+    const inputType=state.mode==='month'?'month':'date';
+    if(input.type!==inputType) input.type=inputType;
+    if(options.navigation || (!picker.open&&document.activeElement!==input)) {
+      const value=state.mode==='month'?state.date.slice(0,7):state.date;
+      if(input.value!==value) input.value=value;
+    }
+    chrome.querySelector('.schedule-period-row').classList.toggle('is-day-period',state.mode==='day');
+    chrome.querySelectorAll('.period-arrow').forEach(button=>button.hidden=state.mode==='day');
+    const dayControls=chrome.querySelector('.day-controls');dayControls.hidden=state.mode!=='day';
+    const start=monday(state.date);
+    chrome.querySelectorAll('[data-day]').forEach((button,index)=>{
+      const date=shiftDay(start,index);
+      button.dataset.day=date;button.setAttribute('aria-pressed',String(date===state.date));button.setAttribute('aria-label',formatDate(date));
+      setText(button.querySelector('small'),weekNames[index]);setText(button.querySelector('span'),Number(date.slice(-2)));
+    });
+    const payload=teacher?state.teacher:state.schedule;
+    const fallback=groups.filter(group=>state.group==='all'||String(group.id)===state.group);
+    const values=teacher?[payload?.freshness||{has_snapshot:false}]:(payload?.freshness||fallback);
+    const failed=values.some(item=>item?.last_fetch_failed),missing=values.some(item=>!item?.has_snapshot);
+    const times=values.map(item=>item?.last_fetch_at).filter(Boolean).sort();
+    const label=missing?'Расписание ещё не загружено':failed?'ДГТУ недоступен · сохранено '+stamp(times[0]):'Проверено '+stamp(times[0]);
+    const freshness=chrome.querySelector('.freshness');freshness.classList.toggle('stale',failed||missing);
+    setText(freshness.querySelector('.freshness-text'),label);
+  }
+  function renderSchedule(options={}) {
+    const shell=ensureScheduleShell();patchScheduleChrome(shell,options);
+    const payload=state.page==='teacher'?state.teacher:state.schedule;
+    const context=scheduleContext();
+    const monthChoices=state.mode==='month'?Object.entries(state.monthDays).filter(([key])=>key.endsWith(firstMonth(state.date))):null;
+    const key=JSON.stringify([context,scheduleRevision(payload),payload?.slots||[],monthChoices,state.error?.message||null]);
+    if(shell.key===key) return;
+    const sameContext=shell.context===context;
+    const saved=sameContext?panePosition(shell.scroll,'[data-lesson]'):scrollPositions.get(context);
+    if(shell.context&&!sameContext) scrollPositions.set(shell.context,panePosition(shell.scroll,'[data-lesson]'));
+    const opened=new Map([...shell.content.querySelectorAll('[data-block-key]')].map(section=>[section.dataset.blockKey,section.open]));
+    let body;
+    if(state.error) body=`<div class="notice" role="alert"><h2>Не удалось загрузить</h2><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`;
+    else if(payload?.candidates?.length&&!payload.teacher) body='<p class="meta">Найдено несколько преподавателей. Выберите нужного.</p>'+payload.candidates.map(person=>btn('teacher-choice',person.id,`${avatar(person)}<span class="person-text"><strong>${esc(person.name)}</strong></span><span class="person-arrow">›</span>`,'person')).join('');
+    else if(state.page==='teacher'&&payload&&!payload.teacher) body=`<div class="empty">${esc(payload.message||'Преподаватель не найден в ДГТУ')}</div>`;
+    else body=!payload||payload.loading?'<p class="busy">Загрузка расписания…</p>':scheduleBody(payload.lessons,state.page==='teacher');
+    shell.content.innerHTML=body;
+    shell.content.querySelectorAll('[data-block-key]').forEach(section=>{if(opened.has(section.dataset.blockKey)) section.open=opened.get(section.dataset.blockKey);});
+    shell.viewport.toggleAttribute('data-swipe-days',state.mode==='day');
+    if(options.navigation) {shell.scroll.scrollTop=0;shell.scroll.scrollLeft=0;}
+    else restorePanePosition(shell.scroll,saved,'[data-lesson]');
+    shell.context=context;
+    // monthCalendar initializes the selected date map on its first render.
+    const choices=state.mode==='month'?Object.entries(state.monthDays).filter(([name])=>name.endsWith(firstMonth(state.date))):null;
+    shell.key=JSON.stringify([context,scheduleRevision(payload),payload?.slots||[],choices,state.error?.message||null]);
+    if(options.direction&&payload&&!payload.loading&&!state.error) animateSchedule(options.direction);
+  }
+  function eventRevision(event) {
+    return [event.id,event.lesson_id,event.kind,event.detected_at,event.group_id,event.group_name,event.types,
+      event.before?visibleLesson(event.before):null,event.after?visibleLesson(event.after):null];
+  }
+  function renderChanges() {
+    if(!feedShell || !view.contains(feedShell.chrome)) {
+      releaseScheduleShell();view.innerHTML=`<div class="changes-chrome">${header('Изменения')}<p class="meta changes-count"></p></div><div class="changes-scroll"><div class="feed-content"></div></div>`;
+      view.scrollTop=0;feedShell={chrome:view.querySelector('.changes-chrome'),scroll:view.querySelector('.changes-scroll'),content:view.querySelector('.feed-content'),key:null};
+    }
+    setText(feedShell.chrome.querySelector('.changes-count'),`Хронология${state.totalEvents!==null?' · '+state.totalEvents+' изменений':''} · время обнаружения ботом`);
+    const key=JSON.stringify([state.events.map(eventRevision),state.nextCursor,state.nextOffset,state.error?.message]);
+    if(key===feedShell.key) return;
+    const saved=panePosition(feedShell.scroll,'[data-event-id]');
+    const more=state.nextCursor!==null||state.nextOffset!==null;
+    feedShell.content.innerHTML=state.error?`<div class="notice" role="alert"><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`:`<div class="feed">${state.events.length?state.events.map(event=>historyEvent(event,true)).join(''):'<div class="empty">Изменений пока нет<p>Журнал заполняется при проверках расписания</p></div>'}</div>`+(more?btn('more-events',state.nextOffset??0,'Показать ещё','action block-button'):'');
+    restorePanePosition(feedShell.scroll,saved,'[data-event-id]');feedShell.key=key;
+  }
+  function render(options={}) {
     app.dataset.season=season();
     app.dataset.cardStyle=profile().miniapp_card_style||'stripe';
     navigation.hidden=!state.bootstrap;
@@ -239,6 +412,11 @@
       if(active) button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
     });
     try {if(['detail','teacher'].includes(state.page)) telegram?.BackButton?.show();else telegram?.BackButton?.hide();} catch(_) {}
+    const fixed=Boolean(state.bootstrap&&['schedule','teacher','changes'].includes(state.page));
+    app.classList.toggle('is-fixed-view',fixed);
+    if(fixed&&state.page!=='changes') {renderSchedule(options);return;}
+    if(fixed&&state.page==='changes') {renderChanges();return;}
+    releaseScheduleShell();feedShell=null;
     if(state.error) {
       view.innerHTML=header('Расписание')+`<div class="notice" role="alert"><h2>Не удалось загрузить</h2><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`;return;
     }
@@ -251,29 +429,13 @@
       return;
     }
     if(state.page==='detail' && state.detail) {view.innerHTML=detailsView();return;}
-    if(state.page==='teacher' && state.teacher) {
-      const result=state.teacher;
-      if(result.candidates?.length && !result.teacher) {
-        view.innerHTML=btn('back','detail','‹ К паре','back')+header('Преподаватель')+'<p class="meta">Найдено несколько преподавателей. Выберите нужного.</p>'+result.candidates.map(person=>btn('teacher-choice',person.id,`${avatar(person)}<span class="person-text"><strong>${esc(person.name)}</strong></span><span class="person-arrow">›</span>`,'person')).join('');return;
-      }
-      if(!result.teacher) {view.innerHTML=btn('back','detail','‹ К паре','back')+`<div class="empty">${esc(result.message||'Преподаватель не найден в ДГТУ')}</div>`;return;}
-      view.innerHTML=btn('back','detail','‹ К паре','back')+`<header class="profile">${avatar(result.teacher)}<h1>${esc(result.teacher.name)}</h1></header>`+toolbar(true)+freshness(result.freshness,false)+scheduleViewport(result.loading?'<p class="busy">Загрузка расписания…</p>':scheduleBody(result.lessons,true));return;
-    }
-    if(state.page==='changes') {
-      view.innerHTML=header('Изменения')+'<p class="meta">История отслеживаемых групп · время обнаружения ботом</p>'+`<div class="feed">${state.events.length?state.events.map(event=>historyEvent(event,true)).join(''):'<div class="empty">Изменений пока нет<p>Журнал заполняется при проверках расписания</p></div>'}</div>`+(state.nextOffset!==null?btn('more-events',state.nextOffset,'Показать ещё','action block-button'):'');return;
-    }
-    if(state.page==='schedule' && state.bootstrap) {
-      const opened=new Map([...view.querySelectorAll('[data-block-key]')].map(section=>[section.dataset.blockKey,section.open]));
-      const month=formatDate(state.date,{month:'long',year:'numeric'}).replace(/ г\.$/,'');
-      view.innerHTML=header(month[0].toLocaleUpperCase('ru-RU')+month.slice(1),true)+toolbar()+(state.schedule?freshness(state.schedule.freshness):'')+scheduleViewport(state.schedule?scheduleBody(state.schedule.lessons):'<p class="busy">Загрузка расписания…</p>');
-      view.querySelectorAll('[data-block-key]').forEach(section=>{if(opened.has(section.dataset.blockKey)) section.open=opened.get(section.dataset.blockKey);});
-      return;
-    }
     view.innerHTML=header(state.page==='detail'?'Занятие':state.page==='teacher'?'Преподаватель':state.page==='changes'?'Изменения':'Расписание')+'<p class="busy">Загрузка…</p>';
   }
   function applyBootstrap(response) {
-    const roster=JSON.stringify(response.groups.map(group=>[group.id,group.primary,group.enabled,group.last_fetch_at,group.last_fetch_failed]));
-    if(rosterVersion && rosterVersion!==roster) clearScheduleCache();
+    const roster=JSON.stringify(response.groups.map(group=>[group.id,group.name,group.primary,group.enabled]));
+    if(rosterVersion && rosterVersion!==roster) {
+      clearScheduleCache();state.events=[];state.nextOffset=null;state.nextCursor=null;state.totalEvents=null;state.feedRevision=null;state.feedLoadedOlder=false;
+    }
     rosterVersion=roster;
     state.bootstrap=response;
     response.profile.display_format ??= 'image';
@@ -298,11 +460,12 @@
         const url=page==='schedule'?'/api/schedule?'+new URLSearchParams({group_id:state.group,...selectedRange}):'/api/teacher?'+new URLSearchParams({lesson_id:state.detail.lesson.id,...selectedRange,...(state.teacherChoice?{teacher_id:state.teacherChoice}:{})});
         cached=scheduleCache.get(url);
         if(cached) state[page]=cached.value;
+        else if(options.keep && scheduleShell?.context===scheduleContext() && state[page]) { /* Keep the visible snapshot during a background check. */ }
         else if(page==='schedule') state.schedule=null;
         else if(state.teacher?.teacher) state.teacher={...state.teacher,lessons:[],loading:true};
         else state.teacher=null;
         if(cached && !options.force && Date.now()-cached.at<60000) return;
-        render();
+        render(options);
         const epoch=cacheEpoch;
         const result=await api(url);
         if(epoch===cacheEpoch && version===requestVersion) {
@@ -315,9 +478,25 @@
         const result=await api('/api/lessons/'+encodeURIComponent(options.lessonId||state.detail?.lesson.id||state.lessonId));
         if(version!==requestVersion) return;state.detail=result;
       } else if(page==='changes') {
-        render();
-        const result=await api('/api/changes?'+new URLSearchParams({limit:50,offset:options.offset||0}));
-        if(version!==requestVersion) return;state.events=options.append?[...state.events,...result.events]:result.events;state.nextOffset=result.next_offset;
+        render(options);
+        const query={limit:50};
+        if(options.append && state.nextCursor!==null) query.before_id=state.nextCursor;
+        else query.offset=options.offset||0;
+        const result=await api('/api/changes?'+new URLSearchParams(query));
+        if(version!==requestVersion) return;
+        const hadOlder=state.feedLoadedOlder;
+        const previousIds=new Set(state.events.map(event=>String(event.id)));
+        const gap=options.keep&&!options.append&&hadOlder&&result.events.length>0&&
+          (result.next_cursor!=null||result.next_offset!=null)&&!result.events.some(event=>previousIds.has(String(event.id)));
+        // Event IDs keep older pages stable when new changes arrive at the top.
+        const merged=new Map((options.append||options.keep?state.events:[]).map(event=>[String(event.id),event]));
+        for(const event of result.events) merged.set(String(event.id),event);
+        state.events=[...merged.values()].sort((a,b)=>Number(b.id)-Number(a.id));
+        if(!options.keep || options.append || !hadOlder || gap) {
+          state.nextOffset=result.next_offset??null;state.nextCursor=result.next_cursor??null;
+        }
+        state.feedLoadedOlder=options.append||Boolean(options.keep&&hadOlder);
+        state.totalEvents=result.total_events??null;state.feedRevision=result.revision??null;
       } else if(page==='settings') {
         await bootstrap();
       }
@@ -327,7 +506,7 @@
         else state.error=error;
       }
     }
-    finally {if(version===requestVersion) {setBusy(false);render();animateSchedule(options.direction);}}
+    finally {if(version===requestVersion) {setBusy(false);render(options);}}
   }
   async function queuedAction(path,body) {
     if(state.busy) return false;
@@ -388,7 +567,7 @@
       state.date=shiftDay(state.date,amount);
       if(parseDate(state.date).getUTCDay()===0) state.date=shiftDay(state.date,amount);
     }
-    await loadPage({direction:amount});
+    await loadPage({direction:amount,navigation:true});
   }
   function cancelGesture(bounce=true) {
     const current=gesture;gesture=null;
@@ -453,7 +632,7 @@
     if(event.detail!==0 && Date.now()<suppressClickUntil) {event.preventDefault();event.stopImmediatePropagation();}
   },true);
   async function syncLive() {
-    if(document.visibilityState==='hidden' || syncing || gesture || state.busy || tapTimer || !state.bootstrap || !['schedule','changes'].includes(state.page)) return;
+    if(document.visibilityState==='hidden' || syncing || gesture || pageMotion?.playState==='running' || state.busy || tapTimer || !state.bootstrap || !['schedule','teacher','changes'].includes(state.page)) return;
     syncing=true;
     const signature=JSON.stringify([state.page,state.date,state.group,state.mode,requestVersion]);
     try {
@@ -477,16 +656,32 @@
     else if(target.dataset.page) {state.page=target.dataset.page;await loadPage();}
     else if(target.dataset.back) {if(target.dataset.back==='teacher' && state.localDetail) {state.detail=state.sourceDetail;state.localDetail=false;state.page='teacher';state.error=null;render();}else if(target.dataset.back==='detail') {state.page='detail';state.error=null;render();}else {state.page=target.dataset.back;await loadPage();}}
     else if(target.dataset.detailTab) {state.detailTab=target.dataset.detailTab;render();}
-    else if(target.dataset.teacherOpen) {state.page='teacher';state.teacherChoice='';state.date=state.detail.lesson.date;await loadPage();}
-    else if(target.dataset.teacherChoice) {state.teacherChoice=target.dataset.teacherChoice;await loadPage();}
-    else if(target.dataset.day) {const direction=target.dataset.day>state.date?1:-1;state.date=target.dataset.day;await loadPage({direction});}
-    else if(target.dataset.monthDay) {state.date=target.dataset.monthDay;state.mode='day';await loadPage();}
+    else if(target.dataset.teacherOpen) {state.page='teacher';state.teacherChoice='';state.date=state.detail.lesson.date;await loadPage({navigation:true});}
+    else if(target.dataset.teacherChoice) {state.teacherChoice=target.dataset.teacherChoice;await loadPage({navigation:true});}
+    else if(target.dataset.day) {const direction=target.dataset.day>state.date?1:-1;state.date=target.dataset.day;await loadPage({direction,navigation:true});}
+    else if(target.dataset.monthDay) {
+      const date=target.dataset.monthDay,group=target.dataset.monthGroup;
+      state.monthDays[monthSelectionKey(group,date)]=date;state.date=date;render();
+      const cell=view.querySelector(`[data-month-day="${CSS.escape(date)}"][data-month-group="${CSS.escape(group)}"]`);
+      cell?.focus({preventScroll:true});
+      const detail=view.querySelector(`.month-day-detail[data-month-group="${CSS.escape(group)}"]`);
+      if(detail&&scheduleShell) scheduleShell.scroll.scrollTo({top:detail.getBoundingClientRect().top-scheduleShell.scroll.getBoundingClientRect().top+scheduleShell.scroll.scrollTop,behavior:reduceMotion()?'instant':'smooth'});
+    }
+    else if(target.dataset.monthCalendar) {
+      const calendar=view.querySelector(`[data-month-calendar-group="${CSS.escape(target.dataset.monthCalendar)}"]`);
+      if(calendar&&scheduleShell) scheduleShell.scroll.scrollTo({top:calendar.getBoundingClientRect().top-scheduleShell.scroll.getBoundingClientRect().top+scheduleShell.scroll.scrollTop-58,behavior:reduceMotion()?'instant':'smooth'});
+    }
+    else if(target.dataset.openMonthDay) {
+      state.date=target.dataset.openMonthDay;
+      if(state.page!=='teacher'&&target.dataset.monthGroup) state.group=target.dataset.monthGroup;
+      state.mode='day';await loadPage({navigation:true});
+    }
     else if(target.dataset.shift) {
       await shiftSchedule(Number(target.dataset.shift));
-    } else if(target.dataset.today) {state.date=safeDay(state.bootstrap.today);await loadPage();}
+    } else if(target.dataset.today) {state.date=safeDay(state.bootstrap.today);state.monthDays={};await loadPage({navigation:true});}
     else if(target.dataset.retry) await loadPage();
     else if(target.dataset.moreEvents) await loadPage({offset:target.dataset.moreEvents,append:true,keep:true});
-    else if(target.dataset.refresh) {if(await queuedAction('/api/refresh',{group_id:state.group})) await loadPage();}
+    else if(target.dataset.refresh) {if(await queuedAction('/api/refresh',{group_id:state.group})) await loadPage({keep:true,force:true});}
     else if(target.dataset.removeGroup) {
       if(confirm('Удалить эту дополнительную группу из отслеживания?') && await queuedAction('/api/groups',{action:'remove',group_id:Number(target.dataset.removeGroup)})) render();
     }
@@ -508,11 +703,11 @@
   });
   app.addEventListener('change',async event=>{
     const target=event.target;
-    if(target.hasAttribute('data-group')) {state.group=target.value;await loadPage();}
-    else if(target.hasAttribute('data-mode')) {state.mode=target.value;await loadPage();}
+    if(target.hasAttribute('data-group')) {state.group=target.value;await loadPage({navigation:true});}
+    else if(target.hasAttribute('data-mode')) {state.mode=target.value;await loadPage({navigation:true});}
     else if(target.hasAttribute('data-date')) {
       const value=target.value.length===7?target.value+'-01':target.value;
-      if(/^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(parseDate(value).valueOf())) {state.date=safeDay(value);await loadPage();}
+      if(/^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(parseDate(value).valueOf())) {state.date=safeDay(value);target.closest('details')?.removeAttribute('open');await loadPage({navigation:true});}
     } else if(target.dataset.save) {
       if(target.type==='radio'&&!target.checked) return;
       state.settingsFocus=settingsFocusKey(target);
@@ -555,6 +750,14 @@
   }
   syncTheme();
   telegram.ready();telegram.expand();
+  function updateViewport(event) {
+    if(event?.isStateStable===false) return;
+    const height=Number(telegram.viewportStableHeight||window.innerHeight);
+    if(height>0) app.style.setProperty('--app-height',height+'px');
+  }
+  updateViewport();
+  window.addEventListener('resize',()=>updateViewport());
+  telegram.onEvent?.('viewportChanged',updateViewport);
   telegram.onEvent?.('themeChanged',syncTheme);
   telegram.BackButton?.onClick(navigateBack);
   document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible') syncLive();});

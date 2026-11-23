@@ -14,7 +14,7 @@ from bot import (BUTTON_CURRENT_WEEK, BUTTON_MONTH, BUTTON_TODAY, BUTTON_SETTING
                  BUTTON_NEXT_WEEK, BUTTON_PREVIOUS_WEEK, BUTTON_TEXT, Bot,
                  changes_message, day_message, future_change_weeks, horizontal_week_card, normalize_lesson,
                  proxy_for_url, request_json, schedule_card, schedule_changes, split_message, text_day_view,
-                 text_week_view, week_card)
+                 text_week_view, week_card, subject_and_type)
 
 
 def lesson(code=1, room="101", start="2026-09-24T09:00:00"):
@@ -30,6 +30,36 @@ def lesson(code=1, room="101", start="2026-09-24T09:00:00"):
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_full_type_labels_and_ordinals_from_dstu(self):
+        examples = (
+            ("Лекция 1 Военная кафедра (ЦВПР с.запаса чт)", "Военная кафедра (ЦВПР с.запаса чт)", "Лекция"),
+            ("ЛЕКЦИЯ 12 Криптография", "Криптография", "Лекция"),
+            ("Практика № 2 Иностранный язык", "Иностранный язык", "Практика"),
+            ("Практическое занятие Программирование", "Программирование", "Практика"),
+            ("Лабораторная работа 3 Сети", "Сети", "Лабораторная"),
+            ("Лабораторная Сети", "Сети", "Лабораторная"),
+            ("лек 1 курс", "1 курс", "Лекция"),
+            ("пр 1С:Предприятие", "1С:Предприятие", "Практика"),
+            ("лаб Программирование", "Программирование", "Лабораторная"),
+            ("Лекция 1С:Предприятие", "1С:Предприятие", "Лекция"),
+            ("Лекционные материалы", "Лекционные материалы", "Занятие"),
+            ("Практикант", "Практикант", "Занятие"),
+            ("1С:Предприятие", "1С:Предприятие", "Занятие"),
+        )
+        for source, title, kind in examples:
+            with self.subTest(source=source):
+                item = lesson()
+                item["дисциплина"] = source
+                self.assertEqual(subject_and_type(item), (title, kind))
+                self.assertEqual(item["дисциплина"], source)
+
+    def test_full_type_recognition_keeps_raw_snapshot_and_code_churn_semantics(self):
+        raw = lesson()
+        raw["дисциплина"] = "Лекция 1 Военная кафедра (ЦВПР с.запаса чт)"
+        normalized = normalize_lesson(raw)
+        self.assertEqual(normalized["дисциплина"], raw["дисциплина"])
+        self.assertEqual(schedule_changes({"1": normalized}, {"9": dict(normalized, код="9")}), [])
+
     def test_room_change_is_reported_once(self):
         old = {"1": lesson(room="101")}
         new = {"1": lesson(room="102")}

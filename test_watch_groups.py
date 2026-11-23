@@ -43,6 +43,41 @@ class WatchGroupsTests(unittest.TestCase):
     def snapshot(self, room='101', code=1):
         return {str(code): lesson(code=code, room=room, start='2026-10-31T08:30:00')}
 
+    def test_full_lecture_military_alias_and_legacy_mute_survive_restart(self):
+        label = 'Лекция 1 Военная кафедра (ЦВПР с.запаса чт)'
+        raw = {**self.snapshot()['1'], 'дисциплина': label}
+        algebra = {**raw, 'дисциплина': 'Лекция 2 Алгебра'}
+        legacy_key = label.casefold()
+        unrelated = {'криптография': 'Криптография', 'лек 1 курс': 'лек 1 курс',
+                     'произвольный-ключ': 'Лекция 3 Сети'}
+        self.owner['muted_subjects'] = {legacy_key: label, 'лекция 2 алгебра': 'Лекция 2 Алгебра', **unrelated}
+        bot.save_state(self.app.state_file, self.app.state)
+        restarted = WatchApp(self.root)
+        owner = restarted.profile_for_chat(42)
+        self.assertEqual(notification_subject(raw), ('военная кафедра', 'Военная кафедра'))
+        self.assertEqual(owner['muted_subjects'], {'военная кафедра': 'Военная кафедра', 'алгебра': 'Алгебра', **unrelated})
+        self.assertFalse(restarted.subject_change_allowed(owner, raw, {**raw, 'аудитория': '102'}))
+        self.assertFalse(restarted.subject_change_allowed(owner, algebra, {**algebra, 'аудитория': '102'}))
+        again = WatchApp(self.root)
+        self.assertEqual(again.profile_for_chat(42)['muted_subjects'], owner['muted_subjects'])
+
+    def test_legacy_full_type_mutes_do_not_duplicate_subject_menu_entries(self):
+        labels = ['Лекция 1 Военная кафедра (ЦВПР с.запаса чт)', 'Лекция 2 Алгебра']
+        self.owner['muted_subjects'] = {label.casefold(): label for label in labels}
+        self.owner['snapshot'] = {str(i): {**self.snapshot(code=i)[str(i)], 'дисциплина': label}
+                                  for i, label in enumerate(labels, 1)}
+        bot.save_state(self.app.state_file, self.app.state)
+        restarted = WatchApp(self.root)
+        owner = restarted.profile_for_chat(42)
+        subjects = restarted.notification_subjects(owner)
+        self.assertEqual(subjects, [('алгебра', 'Алгебра'), ('военная кафедра', 'Военная кафедра')])
+        self.assertEqual(set(owner['muted_subjects']), {key for key, name in subjects})
+
+    def test_legacy_mute_alias_collision_preserves_existing_canonical_entry(self):
+        self.owner['muted_subjects'] = {'алгебра': 'АЛГЕБРА', 'лекция 2 алгебра': 'Лекция 2 Алгебра'}
+        self.app._watch_defaults(self.owner)
+        self.assertEqual(self.owner['muted_subjects'], {'алгебра': 'АЛГЕБРА'})
+
     def child(self, group_id=123, name='ПИ31'):
         child = self.app.new_profile('telegram', 42)
         child.update({'group_id': group_id, 'group_name': name, 'owner_chat_id': 42,
