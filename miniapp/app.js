@@ -11,7 +11,6 @@
   const fullWeekNames = ['Воскресенье','Понедельник','Вторник','Среда','Четверг','Пятница','Суббота'];
   const types = {lec:'Лекция',prac:'Практика',lab:'Лабораторная',other:'Занятие'};
   const statuses = {added:'Добавлено',room:'Аудитория изменена',removed:'Удалено',changed:'Изменено'};
-  const seasons = {autumn:'Осень',winter:'Зима',spring:'Весна',summer:'Лето',classic:'Без сезона'};
   const state = {
     page:'schedule', mode:'day', date:'', group:'', bootstrap:null, schedule:null,
     detail:null, teacher:null, teacherChoice:'', events:[], nextOffset:null, nextCursor:null, totalEvents:null,
@@ -28,6 +27,13 @@
   const esc = value => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const attr = esc;
   const btn=(action,value,text,cls='action')=>`<button type="button" class="${cls}" data-${action}="${attr(value)}">${text}</button>`;
+  // Lucide outlines; see LICENSE.icons for the ISC notice.
+  const iconPaths={
+    chevron:'<path d="m9 18 6-6-6-6"/>',
+    down:'<path d="m6 9 6 6 6-6"/>',
+    refresh:'<path d="M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16m5 0H3v5"/>'
+  };
+  const icon=(name,cls='')=>`<svg class="icon ${cls}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name]||''}</svg>`;
   const parseDate=value=>new Date(value+'T12:00:00Z');
   const isoDate=date=>date.toISOString().slice(0,10);
   const shiftDay=(value,amount)=>{const d=parseDate(value);d.setUTCDate(d.getUTCDate()+amount);return isoDate(d);};
@@ -83,40 +89,27 @@
     const start=monday(state.date);
     return {from:start,to:shiftDay(start,5)};
   }
-  function header(title,withToday=false) {
-    const heading=withToday && state.mode==='day'?`<details class="date-picker"><summary aria-label="Выбрать дату"><h1>${esc(title)}</h1><span aria-hidden="true">⌄</span></summary><label class="date-picker-popup">Перейти к дате<input type="date" aria-label="Дата расписания" data-date value="${attr(state.date)}"></label></details>`:`<h1>${esc(title)}</h1>`;
-    return `<header class="header"><div class="header-line"><span>ДГТУ · Расписание</span><span class="season-label">${seasons[season()]}</span></div><div class="title-line">${heading}${withToday?btn('today','1','Сегодня','quiet-button'):''}</div></header>`;
-  }
-  function toolbar(teacher=false) {
-    const groups=activeGroups();
-    const selector=teacher?`<input type="${state.mode==='month'?'month':'date'}" aria-label="Дата расписания" data-date value="${attr(state.mode==='month'?state.date.slice(0,7):state.date)}">`:groups.length>1?`<select aria-label="Группа расписания" data-group>${groups.map(group=>`<option value="${attr(group.id)}" ${String(group.id)===state.group?'selected':''}>${esc(group.name)}</option>`).join('')}<option value="all" ${state.group==='all'?'selected':''}>Все группы</option></select>`:`<span class="group-label">${esc(groups[0]?.name||profile().group_name||'')}</span>`;
-    const dates=state.mode==='day'?dateStrip():`<div class="date-nav">${btn('shift','-1','‹','') }<input type="${state.mode==='month'?'month':'date'}" aria-label="Дата расписания" data-date value="${attr(state.mode==='month'?state.date.slice(0,7):state.date)}">${btn('shift','1','›','')}</div>`;
-    return `<div class="toolbar">${selector}<select aria-label="Период расписания" data-mode>${[['day','День'],['week','Неделя'],['month','Месяц']].map(([key,label])=>`<option value="${key}" ${state.mode===key?'selected':''}>${label}</option>`).join('')}</select></div>${dates}`;
+  function header(title) {
+    return `<header class="header"><h1>${esc(title)}</h1></header>`;
   }
   function dateStrip() {
     const start=monday(state.date);
-    return `<div class="day-controls">${btn('shift','-1','‹','day-arrow')}<div class="dates" aria-label="Дни недели">${weekNames.map((name,i)=>{
+    return `<div class="day-controls"><button type="button" data-shift="-1" class="day-arrow" aria-label="Предыдущий день">${icon('chevron','icon-previous')}</button><div class="dates" aria-label="Дни недели">${weekNames.map((name,i)=>{
       const date=shiftDay(start,i);
       return `<button type="button" data-day="${date}" aria-pressed="${date===state.date}" aria-label="${attr(formatDate(date))}"><small>${name}</small><span>${Number(date.slice(-2))}</span></button>`;
-    }).join('')}</div>${btn('shift','1','›','day-arrow')}</div>`;
+    }).join('')}</div><button type="button" data-shift="1" class="day-arrow" aria-label="Следующий день">${icon('chevron')}</button></div>`;
   }
   function scheduleViewport(content) {
     return `<div class="schedule-viewport" ${state.mode==='day'?'data-swipe-days="true"':''}><div class="schedule-content">${content}</div></div>`;
-  }
-  function freshness(values,refresh=true) {
-    const rows=Array.isArray(values)?values:[values];
-    const failed=rows.some(item=>item?.last_fetch_failed);
-    const missing=rows.some(item=>!item?.has_snapshot);
-    const times=rows.map(item=>item?.last_fetch_at).filter(Boolean).sort();
-    const label=missing?'Расписание ещё не загружено':failed?'ДГТУ недоступен · сохранено '+stamp(times[0]):'Проверено '+stamp(times[0]);
-    return `<div class="freshness ${failed||missing?'stale':''}"><span>${esc(label)}</span>${refresh?btn('refresh','1','Обновить','text-action'):''}</div>`;
   }
   function lessonCard(item,detail=false) {
     const tag=detail?'article':'button';
     const attrs=detail?'':`type="button" data-lesson="${attr(item.id)}" aria-label="${attr(item.start+'–'+item.end+', '+item.subject+', аудитория '+item.room)}"`;
     const statusName=item.deleted?'removed':item.status;
     const kind=Object.hasOwn(types,item.type)?item.type:'other';
-    return `<${tag} ${attrs} class="lesson" data-kind="${kind}" data-status="${attr(statusName||'')}"><span class="lesson-top"><span><span class="time">${esc(item.start)}–${esc(item.end)}</span> <span class="lesson-meta">· ${types[kind]}${item.subgroup?' · п/г '+esc(item.subgroup):''}</span></span>${statuses[statusName]?`<span class="lesson-status">${statuses[statusName]}</span>`:''}</span><span class="subject">${esc(item.subject)}</span><span class="lesson-bottom"><span class="teacher-name">${esc(item.teacher||'Преподаватель не указан')}</span><span class="room">${esc(item.room||'—')}</span></span></${tag}>`;
+    const slots=(state.page==='teacher'?state.teacher?.slots:state.schedule?.slots)||state.schedule?.slots||[];
+    const slot=slots.findIndex(value=>value.start===item.start&&value.end===item.end);
+    return `<${tag} ${attrs} class="lesson" data-kind="${kind}" data-status="${attr(statusName||'')}"><span class="lesson-top"><span class="lesson-time-row"><span class="time">${esc(item.start)}–${esc(item.end)}</span><span class="lesson-meta">${slot>=0?`${slot+1}-я · `:''}${types[kind]}${item.subgroup?' · п/г '+esc(item.subgroup):''}</span></span>${statuses[statusName]?`<span class="lesson-status">${statuses[statusName]}</span>`:''}</span><span class="subject">${esc(item.subject)}</span><span class="lesson-bottom"><span class="teacher-name">${esc(item.teacher||'Преподаватель не указан')}</span><span class="room">${esc(item.room||'—')}</span></span></${tag}>`;
   }
   function agenda(list) {
     if(!list.length) return '<div class="empty">Нет занятий</div>';
@@ -148,7 +141,7 @@
     return `<div class="${state.mode==='week'?'week-days':''}">${daysForMode().map(date=>{
       const dayLessons=lessons.filter(item=>item.date===date);
       const groups=teacher?[{id:'teacher',name:''}]:state.group==='all'?activeGroups():activeGroups().filter(group=>String(group.id)===state.group);
-      return `<section class="day-section"><div class="heading"><h2>${esc(fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date))}</h2></div>${groups.map((group,index)=>{
+      return `<section class="day-section"><div class="heading ${state.mode==='day'?'day-heading':''}"><h2>${esc(fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date))}</h2></div>${groups.map((group,index)=>{
         const filtered=teacher?dayLessons:dayLessons.filter(item=>String(item.group_id)===String(group.id));
         if(!teacher && state.group==='all') return groupBlock(group,filtered,index===0,date);
         if(teacher) return teacherAgenda(filtered);
@@ -161,7 +154,7 @@
     const changed=list.filter(item=>item.status && item.status!=='baseline').length;
     const sorted=[...active].sort((a,b)=>a.start.localeCompare(b.start));
     const meta=active.length?active.every(item=>item.military)?'Военная кафедра':`${active.length} зан. · ${sorted[0].start}–${sorted.at(-1).end}`:'Нет занятий';
-    return `<details class="group-block" data-block-key="${attr(group.id+':'+date)}" ${open?'open':''}><summary class="group-summary"><span><strong>${esc(group.name)}</strong><small>${esc(meta)}${changed?' · '+changed+' изм.':''}</small></span></summary><div class="group-body">${agenda(list)}</div></details>`;
+    return `<details class="group-block" data-block-key="${attr(group.id+':'+date)}" ${open?'open':''}><summary class="group-summary"><span><strong>${esc(group.name)}</strong><small>${esc(meta)}${changed?' · '+changed+' изм.':''}</small></span>${icon('down','group-chevron')}</summary><div class="group-body">${agenda(list)}</div></details>`;
   }
   function occupiedSlots(list) {
     const slots=new Map();
@@ -186,7 +179,7 @@
     const start=active.length?active.map(item=>item.start).sort()[0]:'';
     const end=active.length?active.map(item=>item.end).sort().at(-1):'';
     const summary=military?'Военная кафедра · весь день':active.length?`${pairCount(slots.length)} · ${start}–${end}`:list.length?'Нет действующих пар · есть удалённые записи':'Нет занятий';
-    const open=`<span class="month-detail-actions"><button type="button" class="text-action" data-month-calendar="${attr(group.id)}">↑ К календарю</button><button type="button" class="text-action" data-open-month-day="${attr(date)}" data-month-group="${attr(group.id)}">Открыть день →</button></span>`;
+    const open=`<span class="month-detail-actions"><button type="button" class="text-action" data-month-calendar="${attr(group.id)}">К календарю</button><button type="button" class="text-action" data-open-month-day="${attr(date)}" data-month-group="${attr(group.id)}">Открыть день</button></span>`;
     return `<section class="month-day-detail" id="month-detail-${attr(group.id)}" data-month-group="${attr(group.id)}" data-date="${attr(date)}"><div class="month-detail-heading"><h2 class="month-selected-title">${esc(fullWeekNames[parseDate(date).getUTCDay()]+', '+formatDate(date))}</h2>${open}</div><p class="month-day-summary">${esc(summary)}</p>${teacher?teacherAgenda(list):agenda(list)}</section>`;
   }
   function monthCalendar(lessons) {
@@ -218,7 +211,7 @@
         const marks=slots.slice(0,7).map(slot=>`<span class="month-slot">${[...slot.kinds].map(kind=>`<i data-kind="${kind}"></i>`).join('')}</span>`).join('');
         return `<button type="button" class="calendar-cell" data-month-day="${date}" data-month-group="${attr(group.id)}" data-count="${slots.length}" data-current="${date===state.bootstrap.today}" aria-pressed="${date===selected}" aria-controls="month-detail-${attr(group.id)}" aria-label="${attr(label)}"><span class="month-cell-date"><time datetime="${date}">${Number(date.slice(-2))}</time>${changed?'<i class="month-change-dot" aria-hidden="true"></i>':''}</span><span class="month-slot-count ${military?'month-military':''}">${military?'ВК':slots.length?pairCount(slots.length):'—'}</span><span class="month-markers" aria-hidden="true">${marks}</span></button>`;
       }).join('')}</div>${monthDetail(group,filtered.filter(item=>item.date===selected),selected,teacher)}`;
-      return state.group==='all' && state.page!=='teacher'?`<details class="group-block" data-block-key="${attr(group.id+':'+firstMonth(state.date))}" ${index===0?'open':''}><summary class="group-summary"><strong>${esc(group.name)}</strong></summary><div class="group-body">${calendar}</div></details>`:calendar;
+      return state.group==='all' && state.page!=='teacher'?`<details class="group-block" data-block-key="${attr(group.id+':'+firstMonth(state.date))}" ${index===0?'open':''}><summary class="group-summary"><strong>${esc(group.name)}</strong>${icon('down','group-chevron')}</summary><div class="group-body">${calendar}</div></details>`:calendar;
     }).join('');
   }
   function historyEvent(event,link=false) {
@@ -244,12 +237,12 @@
   function detailsView() {
     const detail=state.detail,item=detail.lesson;
     const teacher=state.localDetail && state.teacher?.teacher ? state.teacher.teacher : {name:item.teacher};
-    return `${btn('back',state.localDetail?'teacher':state.returnPage,'‹ Назад','back')}<div class="context"><h1>${esc(item.group_name)} · ${esc(formatDate(item.date))}</h1><p>${esc(item.deleted?'Удалённая пара':'Подробности занятия')}</p></div><div class="detail">${lessonCard(item,true)}</div><div class="detail-actions">${btn('detail-tab','details','Преподаватель',state.detailTab==='details'?'action primary':'action')}${btn('detail-tab','history','История',state.detailTab==='history'?'action primary':'action')}</div>${state.detailTab==='history'?historyView(detail):`${btn(state.localDetail?'back':'teacher-open',state.localDetail?'teacher':item.id,`${avatar(teacher)}<span class="person-text"><strong>${esc(item.teacher||'Преподаватель не указан')}</strong><small>Открыть расписание преподавателя</small></span><span class="person-arrow">›</span>`,'person')}<p class="settings-note">Двойное нажатие на пару сразу открывает её историю</p>`}`;
+    return `${btn('back',state.localDetail?'teacher':state.returnPage,`${icon('chevron','icon-previous')}Назад`,'back')}<div class="context"><h1>${esc(item.group_name)} · ${esc(formatDate(item.date))}</h1><p>${esc(item.deleted?'Удалённая пара':'Подробности занятия')}</p></div><div class="detail">${lessonCard(item,true)}</div><div class="detail-actions">${btn('detail-tab','details','Преподаватель',state.detailTab==='details'?'action primary':'action')}${btn('detail-tab','history','История',state.detailTab==='history'?'action primary':'action')}</div>${state.detailTab==='history'?historyView(detail):`${btn(state.localDetail?'back':'teacher-open',state.localDetail?'teacher':item.id,`${avatar(teacher)}<span class="person-text"><strong>${esc(item.teacher||'Преподаватель не указан')}</strong><small>Открыть расписание преподавателя</small></span><span class="person-arrow">${icon('chevron')}</span>`,'person')}<p class="settings-note">Двойное нажатие на пару сразу открывает её историю</p>`}`;
   }
   function settingsView() {
     const user=profile(),fields=state.bootstrap,disabled=state.busy?'disabled':'';
     const check=(key,label,description='')=>`<label class="setting"><span class="setting-label">${esc(label)}${description?`<small>${esc(description)}</small>`:''}</span><input type="checkbox" data-save="${key}" ${user[key]?'checked':''} ${disabled}></label>`;
-    const disclosure=(key,title,summary,body)=>`<details class="settings-block" data-settings-section="${key}" ${state.settingsOpen[key]?'open':''}><summary><span><strong>${esc(title)}</strong><small>${esc(summary)}</small></span><span class="settings-chevron" aria-hidden="true">⌄</span></summary><div class="settings-block-body">${body}</div></details>`;
+    const disclosure=(key,title,summary,body)=>`<details class="settings-block" data-settings-section="${key}" ${state.settingsOpen[key]?'open':''}><summary><span><strong>${esc(title)}</strong><small>${esc(summary)}</small></span><span class="settings-chevron" aria-hidden="true">${icon('down')}</span></summary><div class="settings-block-body">${body}</div></details>`;
     const groupForm=(action,title,placeholder)=>`<form data-group-form="${action}" class="field-row"><label class="field"><span>${title}</span><input name="name" autocomplete="off" maxlength="40" placeholder="${placeholder}" value="${attr(state.groupDrafts[action])}" required ${disabled}></label><button type="submit" class="action" ${disabled}>${action==='primary'?'Выбрать':'Добавить'}</button></form>`;
     const primary=fields.groups.find(group=>group.primary);
     const extra=fields.groups.filter(group=>!group.primary).length;
@@ -301,12 +294,13 @@
     }
   }
   function releaseScheduleShell() {
+    stopScheduleMotion();
     if(scheduleShell?.context) scrollPositions.set(scheduleShell.context,panePosition(scheduleShell.scroll,'[data-lesson]'));
     scheduleShell=null;
   }
   function setText(element,text) {if(element.textContent!==String(text)) element.textContent=String(text);}
   function compactScheduleChrome(teacher) {
-    return `<div class="schedule-chrome"><div class="schedule-topline">${teacher?btn('back','detail','‹ К паре','schedule-back'):'<span>ДГТУ · Расписание</span>'}<span class="season-label"></span></div><div class="schedule-toolbar"><div class="schedule-group-control"></div><select aria-label="Период расписания" data-mode><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select></div><div class="schedule-period-row"><button type="button" class="period-arrow" data-shift="-1" aria-label="Предыдущий период">‹</button><details class="date-picker"><summary aria-label="Выбрать дату"><span class="period-title"></span><span aria-hidden="true">⌄</span></summary><label class="date-picker-popup">Перейти к дате<input type="date" aria-label="Дата расписания" data-date></label></details>${btn('today','1','Сегодня','quiet-button')}<button type="button" class="period-arrow" data-shift="1" aria-label="Следующий период">›</button></div>${dateStrip()}<div class="freshness"><span class="freshness-text"></span>${teacher?'':btn('refresh','1','Обновить','text-action')}</div></div>`;
+    return `<div class="schedule-chrome">${teacher?`<div class="schedule-back-row">${btn('back','detail',`${icon('chevron','icon-previous')}К паре`,'schedule-back')}</div>`:''}<div class="schedule-toolbar"><div class="schedule-group-control"></div><div class="schedule-period-row"><button type="button" class="period-arrow" data-shift="-1" aria-label="Предыдущий период">${icon('chevron','icon-previous')}</button><details class="date-picker"><summary aria-label="Выбрать дату"><span class="period-title"></span>${icon('down')}</summary><label class="date-picker-popup">Перейти к дате<input type="date" aria-label="Дата расписания" data-date></label></details><button type="button" class="period-arrow" data-shift="1" aria-label="Следующий период">${icon('chevron')}</button></div><select aria-label="Период расписания" data-mode><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select></div>${dateStrip()}<div class="freshness"><span class="freshness-text"></span><span class="freshness-actions">${btn('today','1','Сегодня','freshness-today')}${teacher?'':`<button type="button" data-refresh="1" class="refresh-button" aria-label="Обновить расписание" title="Обновить">${icon('refresh')}</button>`}</span></div></div>`;
   }
   function ensureScheduleShell() {
     if(scheduleShell?.page===state.page && view.contains(scheduleShell.chrome)) return scheduleShell;
@@ -319,7 +313,6 @@
   }
   function patchScheduleChrome(shell,options={}) {
     const chrome=shell.chrome,teacher=state.page==='teacher';
-    setText(chrome.querySelector('.season-label'),seasons[season()]);
     const groups=activeGroups();
     const person=state.teacher?.teacher;
     const roster=teacher?JSON.stringify([person?.id,person?.name,person?.avatar_url,state.detail?.lesson.teacher]):JSON.stringify(groups.map(group=>[group.id,group.name]));
@@ -332,8 +325,12 @@
     if(groupControl && groupControl.value!==state.group) groupControl.value=state.group;
     const modeControl=chrome.querySelector('[data-mode]');
     if(modeControl.value!==state.mode) modeControl.value=state.mode;
-    const month=formatDate(state.date,{month:'long',year:'numeric'}).replace(/ г\.$/,'');
-    setText(chrome.querySelector('.period-title'),month[0].toLocaleUpperCase('ru-RU')+month.slice(1));
+    let period=formatDate(state.date,{month:'long',year:'numeric'}).replace(/ г\.$/,'');
+    if(state.mode==='week') {
+      const start=monday(state.date),end=shiftDay(start,5);
+      period=start.slice(0,7)===end.slice(0,7)?`${Number(start.slice(-2))}–${formatDate(end,{day:'numeric',month:'short'})}`:`${formatDate(start,{day:'numeric',month:'short'})} – ${formatDate(end,{day:'numeric',month:'short'})}`;
+    }
+    setText(chrome.querySelector('.period-title'),period[0].toLocaleUpperCase('ru-RU')+period.slice(1));
     const picker=chrome.querySelector('.date-picker'),input=picker.querySelector('[data-date]');
     const inputType=state.mode==='month'?'month':'date';
     if(input.type!==inputType) input.type=inputType;
@@ -342,6 +339,7 @@
       if(input.value!==value) input.value=value;
     }
     chrome.querySelector('.schedule-period-row').classList.toggle('is-day-period',state.mode==='day');
+    chrome.dataset.viewMode=state.mode;
     chrome.querySelectorAll('.period-arrow').forEach(button=>button.hidden=state.mode==='day');
     const dayControls=chrome.querySelector('.day-controls');dayControls.hidden=state.mode!=='day';
     const start=monday(state.date);
@@ -355,7 +353,7 @@
     const values=teacher?[payload?.freshness||{has_snapshot:false}]:(payload?.freshness||fallback);
     const failed=values.some(item=>item?.last_fetch_failed),missing=values.some(item=>!item?.has_snapshot);
     const times=values.map(item=>item?.last_fetch_at).filter(Boolean).sort();
-    const label=missing?'Расписание ещё не загружено':failed?'ДГТУ недоступен · сохранено '+stamp(times[0]):'Проверено '+stamp(times[0]);
+    const label=missing?'Расписание ещё не загружено':failed?'Нет связи · сохранено '+stamp(times[0]):'Проверено '+stamp(times[0]);
     const freshness=chrome.querySelector('.freshness');freshness.classList.toggle('stale',failed||missing);
     setText(freshness.querySelector('.freshness-text'),label);
   }
@@ -372,7 +370,7 @@
     const opened=new Map([...shell.content.querySelectorAll('[data-block-key]')].map(section=>[section.dataset.blockKey,section.open]));
     let body;
     if(state.error) body=`<div class="notice" role="alert"><h2>Не удалось загрузить</h2><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`;
-    else if(payload?.candidates?.length&&!payload.teacher) body='<p class="meta">Найдено несколько преподавателей. Выберите нужного.</p>'+payload.candidates.map(person=>btn('teacher-choice',person.id,`${avatar(person)}<span class="person-text"><strong>${esc(person.name)}</strong></span><span class="person-arrow">›</span>`,'person')).join('');
+    else if(payload?.candidates?.length&&!payload.teacher) body='<p class="meta">Найдено несколько преподавателей. Выберите нужного.</p>'+payload.candidates.map(person=>btn('teacher-choice',person.id,`${avatar(person)}<span class="person-text"><strong>${esc(person.name)}</strong></span><span class="person-arrow">${icon('chevron')}</span>`,'person')).join('');
     else if(state.page==='teacher'&&payload&&!payload.teacher) body=`<div class="empty">${esc(payload.message||'Преподаватель не найден в ДГТУ')}</div>`;
     else body=!payload||payload.loading?'<p class="busy">Загрузка расписания…</p>':scheduleBody(payload.lessons,state.page==='teacher');
     shell.content.innerHTML=body;
@@ -404,6 +402,7 @@
     restorePanePosition(feedShell.scroll,saved,'[data-event-id]');feedShell.key=key;
   }
   function render(options={}) {
+    if(!['schedule','teacher'].includes(state.page)) stopScheduleMotion();
     app.dataset.season=season();
     app.dataset.cardStyle=profile().miniapp_card_style||'stripe';
     navigation.hidden=!state.bootstrap;
@@ -449,7 +448,7 @@
   async function bootstrap() {applyBootstrap(await api('/api/bootstrap'));}
   async function loadPage(options={}) {
     clearTimeout(tapTimer);tapTimer=null;lastTap=null;
-    if(pageMotion) {pageMotion.cancel();pageMotion=null;}
+    stopScheduleMotion(Boolean(options.direction));
     const version=++requestVersion;state.error=null;setBusy(true);
     let cached=null, page=state.page;
     try {
@@ -552,21 +551,64 @@
     else if(state.page==='detail') {state.page=state.returnPage;loadPage();}
   }
   const reduceMotion=()=>window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const scheduleEase='cubic-bezier(.22,1,.36,1)';
+  let scheduleTransition=null;
+  function stopScheduleMotion(keepExit=false) {
+    if(pageMotion) {pageMotion.cancel();pageMotion=null;}
+    if(scheduleTransition&&(!keepExit||scheduleTransition.target!==scheduleContext())) {
+      const previous=scheduleTransition;scheduleTransition=null;
+      clearTimeout(previous.timer);previous.exit.cancel();previous.frame.remove();
+    }
+  }
+  function captureScheduleMotion(direction,content=scheduleShell?.content) {
+    stopScheduleMotion();
+    const pane=scheduleShell?.scroll;
+    if(!content||!pane||reduceMotion()||!content.animate||state.mode!=='day') return null;
+    const box=pane.getBoundingClientRect(),source=content.getBoundingClientRect();
+    if(box.width<=0||box.height<=0) return null;
+    const offset=source.left-box.left;
+    const frame=document.createElement('div');
+    frame.className='schedule-motion-frame';frame.setAttribute('aria-hidden','true');frame.inert=true;
+    Object.assign(frame.style,{position:'fixed',top:box.top+'px',left:box.left+'px',width:box.width+'px',height:box.height+'px',overflow:'hidden',pointerEvents:'none',zIndex:'3'});
+    const copy=content.cloneNode(true);
+    copy.classList.remove('is-dragging');
+    copy.removeAttribute('id');
+    copy.querySelectorAll('[id]').forEach(item=>item.removeAttribute('id'));
+    copy.querySelectorAll('[data-lesson],[data-history]').forEach(item=>{item.removeAttribute('data-lesson');item.removeAttribute('data-history');});
+    Object.assign(copy.style,{position:'absolute',top:(source.top-box.top)+'px',left:'0',width:content.offsetWidth+'px',minHeight:'0',margin:'0',transform:`translate3d(${offset}px,0,0)`,willChange:'transform,opacity'});
+    frame.append(copy);pane.append(frame);
+    const exit=copy.animate([{transform:`translate3d(${offset}px,0,0)`,opacity:1},{transform:`translate3d(${-Math.sign(direction)*box.width}px,0,0)`,opacity:.88}],{duration:220,easing:scheduleEase,fill:'forwards'});
+    const transition={frame,exit,width:box.width,offset,direction:Math.sign(direction),target:null,timer:null};
+    const clear=()=>{frame.remove();clearTimeout(transition.timer);if(scheduleTransition===transition)scheduleTransition=null;};
+    exit.finished.then(clear,clear);
+    transition.timer=setTimeout(clear,280);
+    scheduleTransition=transition;
+    return transition;
+  }
   function animateSchedule(direction) {
     const content=view.querySelector('.schedule-content');
     if(!direction || !content || state.mode!=='day' || reduceMotion() || !content.animate) return;
-    pageMotion=content.animate([
-      {transform:`translate3d(${direction*36}px,0,0)`,opacity:.45},
+    if(pageMotion) pageMotion.cancel();
+    const transition=scheduleTransition?.target===scheduleContext()?scheduleTransition:null;
+    const distance=transition?transition.direction*transition.width+transition.offset:Math.sign(direction)*28;
+    const incoming=content.animate([
+      {transform:`translate3d(${distance}px,0,0)`,opacity:transition?1:.65},
       {transform:'translate3d(0,0,0)',opacity:1}
-    ],{duration:180,easing:'cubic-bezier(.22,1,.36,1)'});
+    ],{duration:220,easing:scheduleEase});
+    if(transition&&transition.exit.currentTime!==null) incoming.currentTime=transition.exit.currentTime;
+    pageMotion=incoming;
+    const clear=()=>{if(pageMotion===incoming)pageMotion=null;};
+    incoming.finished.then(clear,clear);
   }
-  async function shiftSchedule(amount) {
+  async function shiftSchedule(amount,transition=null) {
+    if(state.mode==='day'&&!transition) transition=captureScheduleMotion(amount);
     if(state.mode==='month') state.date=shiftMonth(state.date,amount);
     else if(state.mode==='week') state.date=shiftDay(state.date,7*amount);
     else {
       state.date=shiftDay(state.date,amount);
       if(parseDate(state.date).getUTCDay()===0) state.date=shiftDay(state.date,amount);
     }
+    if(transition) transition.target=scheduleContext();
     await loadPage({direction:amount,navigation:true});
   }
   function cancelGesture(bounce=true) {
@@ -576,7 +618,7 @@
     current.content.style.transform='';current.content.classList.remove('is-dragging');
     try {if(current.viewport.hasPointerCapture(current.id)) current.viewport.releasePointerCapture(current.id);} catch(_) {}
     if(bounce && current.axis==='x' && !reduceMotion() && current.content.animate) {
-      current.content.animate([{transform},{transform:'translate3d(0,0,0)'}],{duration:140,easing:'ease-out'});
+      current.content.animate([{transform},{transform:'translate3d(0,0,0)'}],{duration:180,easing:scheduleEase});
     }
   }
   app.addEventListener('pointerdown',event=>{
@@ -619,8 +661,10 @@
       suppressClickUntil=Date.now()+500;
       clearTimeout(tapTimer);tapTimer=null;lastTap=null;
     }
+    const direction=dx<0?1:-1;
+    const transition=accepted?captureScheduleMotion(direction,current.content):null;
     cancelGesture(!accepted);
-    if(accepted) shiftSchedule(dx<0?1:-1);
+    if(accepted) shiftSchedule(direction,transition);
   });
   app.addEventListener('pointercancel',()=>cancelGesture());
   app.addEventListener('lostpointercapture',event=>{
