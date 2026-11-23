@@ -15,7 +15,8 @@
   const state = {
     page:'schedule', mode:'day', date:'', group:'', bootstrap:null, schedule:null,
     detail:null, teacher:null, teacherChoice:'', events:[], nextOffset:null,
-    returnPage:'schedule', lessonId:'', detailTab:'details', sourceDetail:null, localDetail:false, busy:false, error:null
+    returnPage:'schedule', lessonId:'', detailTab:'details', sourceDetail:null, localDetail:false, busy:false, error:null,
+    settingsTab:'general', settingsOpen:{delivery:true}, groupDrafts:{primary:'',add:''}, settingsFocus:null
   };
   let requestVersion=0, tapTimer=null, lastTap=null, statusTimer=null, syncing=false;
   const scheduleCache=new Map();
@@ -58,7 +59,7 @@
   }
   function setBusy(value) {
     state.busy=value; view.setAttribute('aria-busy',String(value));
-    view.querySelectorAll('[data-save],[data-subject],[data-alert],button[type="submit"]').forEach(el=>el.disabled=value);
+    view.querySelectorAll('[data-save],[data-subject],[data-alert],[data-remove-group],[data-group-form] input,button[type="submit"]').forEach(el=>el.disabled=value);
   }
   async function api(path,body) {
     const response=await fetch(path,{
@@ -204,13 +205,34 @@
     return `${btn('back',state.localDetail?'teacher':state.returnPage,'‹ Назад','back')}<div class="context"><h1>${esc(item.group_name)} · ${esc(formatDate(item.date))}</h1><p>${esc(item.deleted?'Удалённая пара':'Подробности занятия')}</p></div><div class="detail">${lessonCard(item,true)}</div><div class="detail-actions">${btn('detail-tab','details','Преподаватель',state.detailTab==='details'?'action primary':'action')}${btn('detail-tab','history','История',state.detailTab==='history'?'action primary':'action')}</div>${state.detailTab==='history'?historyView(detail):`${btn(state.localDetail?'back':'teacher-open',state.localDetail?'teacher':item.id,`${avatar(teacher)}<span class="person-text"><strong>${esc(item.teacher||'Преподаватель не указан')}</strong><small>Открыть расписание преподавателя</small></span><span class="person-arrow">›</span>`,'person')}<p class="settings-note">Двойное нажатие на пару сразу открывает её историю</p>`}`;
   }
   function settingsView() {
-    const user=profile(),fields=state.bootstrap;
-    const check=(key,label,description='')=>`<label class="setting"><span class="setting-label">${esc(label)}${description?`<small>${esc(description)}</small>`:''}</span><input type="checkbox" data-save="${key}" ${user[key]?'checked':''} ${state.busy?'disabled':''}></label>`;
-    const select=(key,label,options)=>`<label class="setting"><span>${esc(label)}</span><select data-save="${key}" ${state.busy?'disabled':''}>${options.map(([value,name])=>`<option value="${value}" ${user[key]===value?'selected':''}>${name}</option>`).join('')}</select></label>`;
-    return header('Настройки')+`<section class="setting-section"><h2>Расписание и рассылка</h2><div class="settings-panel"><label class="setting"><span>Время отправки<small>По Москве · кроме воскресенья</small></span><input type="time" aria-label="Время ежедневной рассылки" data-save="daily_time" value="${attr(user.daily_time)}" ${state.busy?'disabled':''}></label>${select('display_format','День и неделя в боте',[['image','Картинка'],['text','Текст']])}${select('week_layout','Картинка недели',[['horizontal','Горизонтально'],['vertical','Вертикально'],['list','Список']])}${check('seasonal_theme','Сезонное оформление','Акценты времени года')}${check('send_schedule_on_change','Карточки при изменениях','Присылать обновлённые недели')}${check('multigroup_enabled','Несколько групп','Общие отчёты об изменениях')}</div></section><details class="settings-disclosure"><summary>Мои группы</summary><div class="settings-groups">${fields.groups.map(group=>`<div class="settings-group"><span><strong>${esc(group.name)}</strong><small>${group.primary?'Основная':user.multigroup_enabled?'Отслеживается':'Слежение приостановлено'}</small></span>${group.primary?'':btn('remove-group',String(group.id),'Удалить','danger')}</div>`).join('')}</div><form data-group-form="primary" class="field-row"><label class="field"><span>Сменить основную группу</span><input name="name" autocomplete="off" maxlength="40" placeholder="Например, ВКБ51" required></label><button type="submit" class="action">Выбрать</button></form><form data-group-form="add" class="field-row"><label class="field"><span>Добавить группу</span><input name="name" autocomplete="off" maxlength="40" placeholder="Например, ВКБ52" required></label><button type="submit" class="action">Добавить</button></form><p class="settings-note">Дополнительные группы проверяются при включённой настройке «Несколько групп»</p></details><details class="settings-disclosure"><summary>Виды изменений</summary><div class="settings-panel">${fields.alert_types.map(item=>`<label class="setting"><span>${esc(item.label)}</span><input type="checkbox" data-alert="${attr(item.key)}" ${user.alert_types.includes(item.key)?'checked':''} ${state.busy?'disabled':''}></label>`).join('')}</div></details><details class="settings-disclosure"><summary>Уведомления по предметам</summary><div class="settings-panel">${fields.subjects.length?fields.subjects.map(item=>`<label class="setting"><span class="setting-label">${esc(item.name)}</span><input type="checkbox" data-subject="${attr(item.key)}" ${item.enabled?'checked':''} ${state.busy?'disabled':''}></label>`).join(''):'<p class="busy">Предметы появятся после загрузки расписания</p>'}</div><p class="settings-note">Отключённые предметы остаются в расписании. Фильтр применяется к следующим проверкам; уже сформированная очередь сохраняется.</p></details><p class="settings-note">Эти настройки общие с Telegram-ботом. Все его кнопки и команды продолжают работать.</p>`;
+    const user=profile(),fields=state.bootstrap,disabled=state.busy?'disabled':'';
+    const check=(key,label,description='')=>`<label class="setting"><span class="setting-label">${esc(label)}${description?`<small>${esc(description)}</small>`:''}</span><input type="checkbox" data-save="${key}" ${user[key]?'checked':''} ${disabled}></label>`;
+    const disclosure=(key,title,summary,body)=>`<details class="settings-block" data-settings-section="${key}" ${state.settingsOpen[key]?'open':''}><summary><span><strong>${esc(title)}</strong><small>${esc(summary)}</small></span><span class="settings-chevron" aria-hidden="true">⌄</span></summary><div class="settings-block-body">${body}</div></details>`;
+    const groupForm=(action,title,placeholder)=>`<form data-group-form="${action}" class="field-row"><label class="field"><span>${title}</span><input name="name" autocomplete="off" maxlength="40" placeholder="${placeholder}" value="${attr(state.groupDrafts[action])}" required ${disabled}></label><button type="submit" class="action" ${disabled}>${action==='primary'?'Выбрать':'Добавить'}</button></form>`;
+    const primary=fields.groups.find(group=>group.primary);
+    const extra=fields.groups.filter(group=>!group.primary).length;
+    const groupsBody=`<div class="settings-groups">${fields.groups.map(group=>`<div class="settings-group"><span><strong>${esc(group.name)}</strong><small>${group.primary?'Основная группа':user.multigroup_enabled?'Отслеживается':'Отслеживание выключено'}</small></span>${group.primary?'':`<button type="button" class="danger" data-remove-group="${attr(group.id)}" ${disabled}>Удалить</button>`}</div>`).join('')}</div>${groupForm('primary','Основная группа','Например, ВКБ51')}<div class="settings-divider"></div>${check('multigroup_enabled','Несколько групп','Отслеживать дополнительные группы')}${user.multigroup_enabled?groupForm('add','Добавить группу','Например, ВКБ52'):''}`;
+    const deliveryBody=`<label class="setting"><span class="setting-label">Время отправки<small>По Москве · кроме воскресенья</small></span><input type="time" aria-label="Время ежедневной рассылки" data-save="daily_time" value="${attr(user.daily_time)}" ${disabled}></label><label class="setting"><span class="setting-label">Формат в чате<small>Ежедневное расписание</small></span><select aria-label="Формат расписания в чате" data-save="display_format" ${disabled}>${[['image','Картинка'],['text','Текст']].map(([value,label])=>`<option value="${value}" ${user.display_format===value?'selected':''}>${label}</option>`).join('')}</select></label>`;
+    const typesBody=fields.alert_types.map(item=>`<label class="setting"><span class="setting-label">${esc(item.label.replace(/^[^\p{L}\p{N}]+/u,''))}</span><input type="checkbox" data-alert="${attr(item.key)}" ${user.alert_types.includes(item.key)?'checked':''} ${disabled}></label>`).join('');
+    const subjectsBody=fields.subjects.length?fields.subjects.map(item=>`<label class="setting"><span class="setting-label">${esc(item.name)}</span><input type="checkbox" data-subject="${attr(item.key)}" ${item.enabled?'checked':''} ${disabled}></label>`).join(''):'<p class="settings-note">Предметы появятся после загрузки расписания</p>';
+    const muted=Object.keys(user.muted_subjects).length;
+    const notificationsBody=`${check('send_schedule_on_change','Присылать новое расписание','Вместе с уведомлением об изменениях')}${disclosure('alert_types','Виды изменений',`${user.alert_types.length} из ${fields.alert_types.length} включено`,typesBody)}${disclosure('subjects','Предметы',muted?`Отключено: ${muted}`:'Все предметы включены',subjectsBody)}<p class="settings-note">Фильтры действуют со следующей проверки. Предметы остаются в расписании.</p>`;
+    const general=disclosure('groups','Группы',`${primary?.name||user.group_name}${extra?` · ещё ${extra}`:''}`,groupsBody)+disclosure('delivery','Рассылка',`${user.daily_time} по Москве · ${user.display_format==='text'?'текст':'картинка'}`,deliveryBody)+disclosure('notifications','Уведомления',`${user.alert_types.length} из ${fields.alert_types.length} видов изменений${muted?` · отключено предметов: ${muted}`:''}`,notificationsBody);
+    const styleChoices=[['stripe','Цветная полоса','Нейтральные карточки с цветной меткой'],['fill','Мягкая заливка','Цвет занятия заполняет карточку']].map(([value,title,description])=>`<label class="appearance-choice" data-preview-style="${value}"><span class="choice-heading"><span><strong>${title}</strong><small>${description}</small></span><input type="radio" name="miniapp_card_style" data-save="miniapp_card_style" value="${value}" ${user.miniapp_card_style===value?'checked':''} ${disabled}></span><span class="appearance-samples" aria-hidden="true">${[['lec','Лекция','Защита информации','1-282'],['prac','Практика','Иностранный язык','1-027'],['lab','Лабораторная','Программные средства','1-333А']].map(([kind,type,title,room])=>`<span class="appearance-sample" data-kind="${kind}"><span><small>${type}</small><span>${title}</span></span><strong>${room}</strong></span>`).join('')}</span></label>`).join('');
+    const layouts=[['horizontal','Горизонтально'],['vertical','Вертикально'],['list','Список']].map(([value,title])=>`<label class="layout-choice"><span class="layout-diagram layout-${value}" aria-hidden="true">${Array.from({length:value==='list'?4:6},(_,i)=>`<span data-kind="${['lec','prac','lab'][i%3]}"></span>`).join('')}</span><span class="layout-choice-label"><input type="radio" name="week_layout" data-save="week_layout" value="${value}" ${user.week_layout===value?'checked':''} ${disabled}><span>${title}</span></span></label>`).join('');
+    const appearance=`<section class="appearance-section"><h2>Сезонная тема</h2><div class="settings-panel">${check('seasonal_theme','Оформление времени года','Акценты в календаре и картинках бота')}</div></section><section class="appearance-section"><h2>Карточки в приложении</h2><div class="appearance-choices">${styleChoices}</div></section><section class="appearance-section"><h2>Картинка недели в боте</h2><p class="section-description">Для недельного расписания в сообщениях Telegram</p><div class="layout-choices">${layouts}</div></section>`;
+    return header('Настройки')+`<div class="settings-tabs" role="tablist" aria-label="Настройки"><button type="button" id="settings-general-tab" role="tab" aria-selected="${state.settingsTab==='general'}" aria-controls="settings-general-panel" data-settings-tab="general">Основное</button><button type="button" id="settings-appearance-tab" role="tab" aria-selected="${state.settingsTab==='appearance'}" aria-controls="settings-appearance-panel" data-settings-tab="appearance">Оформление</button></div><section id="settings-general-panel" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-general-tab" ${state.settingsTab==='general'?'':'hidden'}>${general}</section><section id="settings-appearance-panel" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-appearance-tab" ${state.settingsTab==='appearance'?'':'hidden'}>${appearance}</section>`;
+  }
+  function settingsFocusKey(element) {
+    if(!element || !view.contains(element)) return null;
+    if(element.dataset.settingsTab) return `[data-settings-tab="${element.dataset.settingsTab}"]`;
+    for(const key of ['save','subject','alert']) if(element.dataset[key]) return `[data-${key}="${CSS.escape(element.dataset[key])}"]${element.type==='radio'?`[value="${CSS.escape(element.value)}"]`:''}`;
+    const form=element.closest('[data-group-form]');
+    return form&&element.matches('input[name="name"]')?`[data-group-form="${form.dataset.groupForm}"] input[name="name"]`:null;
   }
   function render() {
     app.dataset.season=season();
+    app.dataset.cardStyle=profile().miniapp_card_style||'stripe';
     navigation.hidden=!state.bootstrap;
     navigation.querySelectorAll('[data-page]').forEach(button=>{
       const active=button.dataset.page===(['detail','teacher'].includes(state.page)?state.returnPage:state.page);
@@ -221,11 +243,11 @@
       view.innerHTML=header('Расписание')+`<div class="notice" role="alert"><h2>Не удалось загрузить</h2><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`;return;
     }
     if(state.page==='settings') {
-      const open=[...view.querySelectorAll('.settings-disclosure')].map(section=>section.open);
-      const inputValues=[...view.querySelectorAll('[data-group-form] input')].map(input=>input.value);
+      const focus=settingsFocusKey(document.activeElement)||state.settingsFocus;
       view.innerHTML=settingsView();
-      view.querySelectorAll('.settings-disclosure').forEach((section,index)=>section.open=Boolean(open[index]));
-      view.querySelectorAll('[data-group-form] input').forEach((input,index)=>input.value=inputValues[index]||'');
+      const replacement=focus?view.querySelector(focus):null;
+      if(replacement&&!replacement.disabled&&replacement.getClientRects().length) replacement.focus({preventScroll:true});
+      if(!state.busy) state.settingsFocus=null;
       return;
     }
     if(state.page==='detail' && state.detail) {view.innerHTML=detailsView();return;}
@@ -257,6 +279,7 @@
     response.profile.display_format ??= 'image';
     response.profile.alert_types ??= response.alert_types.map(item=>item.key);
     response.profile.muted_subjects ??= {};
+    response.profile.miniapp_card_style ??= 'stripe';
     if(!state.date) state.date=safeDay(response.today);
     if(!activeGroups().some(group=>String(group.id)===state.group) && state.group!=='all') state.group=String(response.profile.group_id);
     if(state.group==='all' && activeGroups().length<2) state.group=String(response.profile.group_id);
@@ -447,7 +470,11 @@
     if(target.dataset.lesson) {activateLesson(target.dataset.lesson,event);return;}
     if(target.dataset.history) {openLesson(target.dataset.history,true);return;}
     clearTimeout(tapTimer);tapTimer=null;lastTap=null;
-    if(target.dataset.page) {state.page=target.dataset.page;await loadPage();}
+    if(target.dataset.settingsTab) {
+      state.settingsTab=target.dataset.settingsTab;render();
+      view.querySelector(`[data-settings-tab="${state.settingsTab}"]`)?.focus({preventScroll:true});
+    }
+    else if(target.dataset.page) {state.page=target.dataset.page;await loadPage();}
     else if(target.dataset.back) {if(target.dataset.back==='teacher' && state.localDetail) {state.detail=state.sourceDetail;state.localDetail=false;state.page='teacher';state.error=null;render();}else if(target.dataset.back==='detail') {state.page='detail';state.error=null;render();}else {state.page=target.dataset.back;await loadPage();}}
     else if(target.dataset.detailTab) {state.detailTab=target.dataset.detailTab;render();}
     else if(target.dataset.teacherOpen) {state.page='teacher';state.teacherChoice='';state.date=state.detail.lesson.date;await loadPage();}
@@ -465,6 +492,20 @@
     }
   });
   app.addEventListener('dblclick',event=>{if(event.target.closest('[data-lesson]')) event.preventDefault();});
+  app.addEventListener('keydown',event=>{
+    if(!event.target.matches('[data-settings-tab]') || !['ArrowLeft','ArrowRight','Home','End'].includes(event.key)) return;
+    event.preventDefault();
+    state.settingsTab=event.key==='Home'?'general':event.key==='End'?'appearance':state.settingsTab==='general'?'appearance':'general';
+    render();view.querySelector(`[data-settings-tab="${state.settingsTab}"]`)?.focus({preventScroll:true});
+  });
+  app.addEventListener('toggle',event=>{
+    const key=event.target.dataset.settingsSection;
+    if(key&&view.contains(event.target)) state.settingsOpen[key]=event.target.open;
+  },true);
+  app.addEventListener('input',event=>{
+    const form=event.target.closest('[data-group-form]');
+    if(form&&event.target.matches('input[name="name"]')) state.groupDrafts[form.dataset.groupForm]=event.target.value;
+  });
   app.addEventListener('change',async event=>{
     const target=event.target;
     if(target.hasAttribute('data-group')) {state.group=target.value;await loadPage();}
@@ -473,15 +514,19 @@
       const value=target.value.length===7?target.value+'-01':target.value;
       if(/^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(parseDate(value).valueOf())) {state.date=safeDay(value);await loadPage();}
     } else if(target.dataset.save) {
+      if(target.type==='radio'&&!target.checked) return;
+      state.settingsFocus=settingsFocusKey(target);
       const value=target.type==='checkbox'?target.checked:target.value;
       const success=await queuedAction('/api/settings',{[target.dataset.save]:value});
       if(!success) await bootstrap().catch(()=>{});
       render();
     } else if(target.dataset.alert) {
+      state.settingsFocus=settingsFocusKey(target);
       const selected=new Set(profile().alert_types);
       if(target.checked) selected.add(target.dataset.alert);else selected.delete(target.dataset.alert);
       await queuedAction('/api/settings',{alert_types:[...selected]});render();
     } else if(target.dataset.subject) {
+      state.settingsFocus=settingsFocusKey(target);
       const muted={...profile().muted_subjects};
       const subject=state.bootstrap.subjects.find(item=>item.key===target.dataset.subject);
       if(target.checked) delete muted[target.dataset.subject];else muted[target.dataset.subject]=subject.name;
@@ -494,7 +539,8 @@
     event.preventDefault();
     const name=new FormData(form).get('name').trim();
     if(!name) return;
-    if(await queuedAction('/api/groups',{action:form.dataset.groupForm,name})) {form.reset();render();}
+    state.settingsFocus=`[data-group-form="${form.dataset.groupForm}"] input[name="name"]`;
+    if(await queuedAction('/api/groups',{action:form.dataset.groupForm,name})) {state.groupDrafts[form.dataset.groupForm]='';form.reset();render();}
   });
   app.addEventListener('error',event=>{
     const image=event.target;

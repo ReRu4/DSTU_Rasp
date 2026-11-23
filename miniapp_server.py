@@ -26,7 +26,7 @@ from watch_groups import notification_subject
 LOG = logging.getLogger("rasp_bot.miniapp")
 PERSONAL_KEYS = ("group_id", "group_name", "daily_time", "week_layout", "seasonal_theme",
                  "display_format", "alert_types", "muted_subjects", "multigroup_enabled",
-                 "send_schedule_on_change")
+                 "send_schedule_on_change", "miniapp_card_style")
 
 
 class APIError(Exception):
@@ -234,7 +234,10 @@ class MiniAppService:
             profile = {key: owner.get(key) for key in PERSONAL_KEYS}
             profile.update({"display_format": owner.get("display_format") or "image",
                             "alert_types": sorted(core.profile_alert_types(owner)),
-                            "muted_subjects": owner.get("muted_subjects") or {}})
+                            "muted_subjects": owner.get("muted_subjects") or {},
+                            "miniapp_card_style": (owner.get("miniapp_card_style")
+                                                   if owner.get("miniapp_card_style") in ("stripe", "fill")
+                                                   else "stripe")})
             return {"today": datetime.now(core.MOSCOW).date().isoformat(), "timezone": "Europe/Moscow",
                     "profile": profile, "groups": group_info(owner),
                     "subjects": [{"key": key, "name": name, "enabled": key not in (owner.get("muted_subjects") or {})}
@@ -322,6 +325,8 @@ def validate_command(kind, data, owner):
             if key == "week_layout" and value not in ("horizontal", "vertical", "list"):
                 invalid()
             if key == "display_format" and value not in ("text", "image"):
+                invalid()
+            if key == "miniapp_card_style" and (not isinstance(value, str) or value not in ("stripe", "fill")):
                 invalid()
             if key == "alert_types" and (not isinstance(value, list) or any(not isinstance(x, str) or x not in core.ALERT_LABELS for x in value)):
                 invalid()

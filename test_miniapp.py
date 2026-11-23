@@ -144,6 +144,59 @@ class MiniAppTests(unittest.TestCase):
         with self.assertRaises(APIError):
             self.dispatch('/api/refresh', method='POST', body={'group_id': 99})
 
+    def test_card_style_is_personal_persisted_and_independent_of_bot_appearance(self):
+        before = {key: self.owner.get(key) for key in ('week_layout', 'seasonal_theme', 'display_format')}
+        self.assertEqual(self.dispatch('/api/bootstrap')['profile']['miniapp_card_style'], 'stripe')
+        job = self.dispatch('/api/settings', method='POST', body={'miniapp_card_style': 'fill'})
+        self.assertEqual(self.owner['miniapp_card_style'], 'stripe')
+        self.app.process_miniapp_commands()
+        self.assertEqual(self.dispatch('/api/jobs/' + job['job_id'])['status'], 'done')
+        self.assertEqual(self.dispatch('/api/bootstrap')['profile']['miniapp_card_style'], 'fill')
+        self.assertEqual(self.dispatch('/api/bootstrap', user=43)['profile']['miniapp_card_style'], 'stripe')
+        self.assertEqual({key: self.owner.get(key) for key in before}, before)
+        restarted = ScheduleBot(self.root)
+        self.assertEqual(restarted.profile_for_chat(42)['miniapp_card_style'], 'fill')
+        self.assertEqual(restarted.profile_for_chat(43)['miniapp_card_style'], 'stripe')
+        self.assertEqual({key: restarted.profile_for_chat(42).get(key) for key in before}, before)
+
+    def test_card_style_can_be_changed_back_through_jobs(self):
+        for style in ('fill', 'stripe'):
+            with self.subTest(style=style):
+                job = self.dispatch('/api/settings', method='POST', body={'miniapp_card_style': style})
+                self.app.process_miniapp_commands()
+                self.assertEqual(self.dispatch('/api/jobs/' + job['job_id'])['status'], 'done')
+                self.assertEqual(self.dispatch('/api/bootstrap')['profile']['miniapp_card_style'], style)
+
+    def test_invalid_card_styles_are_bad_requests_and_not_queued(self):
+        for value in ('other', '', 'FILL', None, True, 1, [], ['fill'], {}, {'style': 'fill'}):
+            with self.subTest(value=value), self.assertRaises(APIError) as error:
+                self.dispatch('/api/settings', method='POST', body={'miniapp_card_style': value})
+            self.assertEqual(error.exception.status, 400)
+        self.assertIsNone(self.app.miniapp_queue.next())
+        self.assertEqual(self.owner['miniapp_card_style'], 'stripe')
+
+    def test_legacy_card_style_defaults_without_resetting_existing_choices(self):
+        self.owner.pop('miniapp_card_style')
+        self.other['miniapp_card_style'] = 'fill'
+        before = {key: self.owner.get(key) for key in ('week_layout', 'seasonal_theme', 'display_format')}
+        self.persist()
+        self.assertEqual(self.dispatch('/api/bootstrap')['profile']['miniapp_card_style'], 'stripe')
+        restarted = ScheduleBot(self.root)
+        self.assertEqual(restarted.profile_for_chat(42)['miniapp_card_style'], 'stripe')
+        self.assertEqual(restarted.profile_for_chat(43)['miniapp_card_style'], 'fill')
+        self.assertEqual({key: restarted.profile_for_chat(42).get(key) for key in before}, before)
+
+    def test_card_style_follows_owner_when_monitoring_other_groups(self):
+        child = self.app.new_profile('telegram', 42)
+        child.update({'group_id': 123, 'group_name': 'ВКБ52', 'owner_chat_id': 42})
+        self.owner['watched_groups']['123'] = child
+        self.owner.update({'miniapp_card_style': 'fill', 'multigroup_enabled': True})
+        self.assertEqual(child['miniapp_card_style'], 'stripe')
+        monitored = self.app.monitored_schedules(self.owner)
+        self.assertIn(child, monitored)
+        self.assertEqual(child['miniapp_card_style'], 'fill')
+        self.assertEqual(self.other['miniapp_card_style'], 'stripe')
+
     def test_disabled_groups_are_not_accessible_and_addition_is_personal(self):
         self.owner['multigroup_enabled'] = True
         with patch('bot.find_group_id', return_value=123), patch('bot.fetch_schedule', return_value=self.snapshot):

@@ -16,7 +16,7 @@ import bot as core
 MAX_WATCHED_GROUPS = 10
 SUBJECTS_PER_PAGE = 6
 PERSONAL_FIELDS = ("daily_time", "week_layout", "seasonal_theme", "alert_types", "display_format",
-                   "send_schedule_on_change", "muted_subjects")
+                   "send_schedule_on_change", "muted_subjects", "miniapp_card_style")
 
 
 def notification_subject(item):
@@ -47,6 +47,8 @@ class WatchGroupsMixin:
         profile.setdefault("send_schedule_on_change", False)
         profile.setdefault("pending_group_changes", {})
         profile.setdefault("muted_subjects", {})
+        if profile.get("miniapp_card_style") not in ("stripe", "fill"):
+            profile["miniapp_card_style"] = "stripe"
 
     def new_profile(self, *args, **kwargs):
         profile = super().new_profile(*args, **kwargs)
