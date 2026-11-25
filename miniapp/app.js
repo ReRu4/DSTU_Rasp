@@ -14,14 +14,14 @@
   const state = {
     page:'schedule', mode:'day', date:'', group:'', bootstrap:null, schedule:null,
     detail:null, teacher:null, teacherChoice:'', events:[], nextOffset:null, nextCursor:null, totalEvents:null,
-    returnPage:'schedule', lessonId:'', detailTab:'details', sourceDetail:null, localDetail:false, busy:false, error:null,
+    returnPage:'schedule', lessonId:'', detailTab:'details', detailComparisonEvent:'', detailComparisons:{}, sourceDetail:null, localDetail:false, busy:false, error:null,
     settingsTab:'general', settingsOpen:{delivery:true}, groupDrafts:{primary:'',add:''}, settingsFocus:null, feedRevision:null, feedLoadedOlder:false,
     monthDays:{}
   };
   let requestVersion=0, tapTimer=null, lastTap=null, statusTimer=null, syncing=false;
   const scheduleCache=new Map();
   let rosterVersion='', cacheEpoch=0, gesture=null, suppressClickUntil=0, pageMotion=null;
-  let scheduleShell=null, feedShell=null;
+  let scheduleShell=null, feedShell=null, feedPosition=null;
   const scrollPositions=new Map();
   function clearScheduleCache() {scheduleCache.clear();cacheEpoch++;}
   const esc = value => String(value??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -31,6 +31,10 @@
   const iconPaths={
     chevron:'<path d="m9 18 6-6-6-6"/>',
     down:'<path d="m6 9 6 6 6-6"/>',
+    plus:'<path d="M12 5v14M5 12h14"/>',
+    minus:'<path d="M5 12h14"/>',
+    swap:'<path d="M8 3 4 7l4 4M4 7h16M16 21l4-4-4-4M20 17H4"/>',
+    restore:'<path d="M3 12a9 9 0 1 0 2.6-6.4L3 8M3 3v5h5"/>',
     refresh:'<path d="M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16m5 0H3v5"/>'
   };
   const icon=(name,cls='')=>`<svg class="icon ${cls}" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name]||''}</svg>`;
@@ -214,20 +218,140 @@
       return state.group==='all' && state.page!=='teacher'?`<details class="group-block" data-block-key="${attr(group.id+':'+firstMonth(state.date))}" ${index===0?'open':''}><summary class="group-summary"><strong>${esc(group.name)}</strong>${icon('down','group-chevron')}</summary><div class="group-body">${calendar}</div></details>`:calendar;
     }).join('');
   }
+  function feedChangedFields(event) {
+    const before=event.before,after=event.after;
+    if(!before||!after) return [];
+    const time=item=>[item.start,item.end].filter(Boolean).join('–');
+    const fields=[
+      ['room','Аудитория',before.room||'',after.room||'','room'],
+      ['date','Дата',before.date||'',after.date||'','date'],
+      ['time','Время',time(before),time(after),'time'],
+      ['teacher','Преподаватель',before.teacher||'',after.teacher||'','long'],
+      ['subject','Предмет',before.subject||'',after.subject||'','long'],
+      ['type','Тип занятия',before.type||'other',after.type||'other','type'],
+      ['subgroup','Подгруппа',String(before.subgroup||''),String(after.subgroup||''),'subgroup'],
+      ['replacement','Замена',Boolean(before.replacement),Boolean(after.replacement),'replacement'],
+      ['topic','Тема',before.topic||'',after.topic||'','long'],
+      ['link','Ссылка',before.link||'',after.link||'','long']
+    ];
+    return fields.filter(([, ,oldValue,newValue])=>oldValue!==newValue).map(([key,label,oldValue,newValue,style])=>({key,label,oldValue,newValue,style}));
+  }
+  function feedValue(value,style) {
+    if(style==='replacement') return value?'Да':'Нет';
+    if(style==='subgroup') return value?'Подгруппа '+value:'Вся группа';
+    if(style==='type') return types[value]||types.other;
+    if(style==='date'&&value) return formatDate(value,{day:'numeric',month:'long',year:'numeric'});
+    return String(value||'—');
+  }
+  function feedMoment(value) {
+    const date=new Date(value||'');
+    if(Number.isNaN(date.valueOf())) return {day:'',time:'Время неизвестно'};
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en',{year:'numeric',month:'2-digit',day:'2-digit',timeZone:'Europe/Moscow'}).formatToParts(date).map(part=>[part.type,part.value]));
+    return {day:`${parts.year}-${parts.month}-${parts.day}`,time:date.toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})};
+  }
+  function changeEventCard(event) {
+    const item=event.after||event.before||{},fields=feedChangedFields(event),moment=feedMoment(event.detected_at);
+    const kind=event.kind||'changed';
+    const single=fields.length===1?fields[0].key:null;
+    const titles={room:'Аудитория изменена',date:'Дата изменена',time:'Время изменено',teacher:'Преподаватель изменён',subject:'Предмет изменён',type:'Тип занятия изменён',subgroup:'Подгруппа изменена',replacement:'Данные о замене изменены',topic:'Тема изменена',link:'Ссылка изменена'};
+    const title={added:'Пара добавлена',removed:'Пара удалена',restored:'Пара восстановлена',baseline:'Начало наблюдения'}[kind]||titles[single]||'Пара изменена';
+    const symbol={added:'plus',removed:'minus',restored:'restore',baseline:'restore'}[kind]||'swap';
+    const marker=kind==='changed'?(single||'changed'):kind;
+    const date=item.date?formatDate(item.date,{weekday:'short',day:'numeric',month:'long',year:'numeric'}):'Дата не указана';
+    const time=[item.start,item.end].filter(Boolean).join('–');
+    const context=[event.group_name,date,kind==='changed'?time:types[item.type]||types.other].filter(Boolean).join(' · ');
+    let body;
+    if(kind==='added'||kind==='restored'||kind==='removed') {
+      body=`<span class="ce-slot ${kind==='removed'?'ce-slot-removed':''}">${esc(time||'Время не указано')}</span><span class="ce-secondary">${esc([item.teacher,item.room].filter(Boolean).join(' · '))}</span>`;
+    } else if(kind==='baseline') body='<span class="ce-secondary">Пара уже была в расписании при первой проверке</span>';
+    else if(fields.length) body=fields.map(field=>`<span class="ce-diff" data-field="${field.key}" data-layout="${field.style}"><span class="ce-diff-label">${esc(field.label)}</span><span class="ce-values"><del>${esc(feedValue(field.oldValue,field.style))}</del><span class="ce-diff-arrow" aria-hidden="true">→</span><strong>${esc(feedValue(field.newValue,field.style))}</strong></span></span>`).join('');
+    else body='<span class="ce-secondary">Изменились дополнительные сведения о занятии</span>';
+    return `<button type="button" class="change-event" data-event-id="${attr(event.id)}" data-event="${attr(marker)}" data-history="${attr(event.lesson_id)}" data-history-event="${attr(event.id)}"><span class="ce-top"><span class="ce-status">${icon(symbol)}${esc(title)}</span><time datetime="${attr(event.detected_at||'')}" aria-label="Бот обнаружил изменение ${attr(stamp(event.detected_at))}, МСК">${esc(moment.time)}</time></span><span class="ce-subject">${esc(item.subject||'Занятие')}</span><span class="ce-context">${esc(context)}</span><span class="ce-body">${body}</span><span class="ce-footer">Сравнить версии${icon('chevron')}</span></button>`;
+  }
   function historyEvent(event,link=false) {
+    if(link) return changeEventCard(event);
     const labels={baseline:'Начало наблюдения',added:'Добавлена',removed:'Удалена',restored:'Восстановлена',changed:'Изменена'};
     const type=event.kind==='changed' && event.types?.length===1?event.types[0]:event.kind;
     const title=event.kind==='changed' && event.types?.length===1?{room:'Аудитория изменена',time:'Дата или время изменены',teacher:'Преподаватель изменён',subject:'Предмет изменён',subgroup:'Подгруппа изменена'}[event.types[0]]||'Пара изменена':labels[event.kind]||'Пара изменена';
     const before=event.before,after=event.after,item=after||before;
-    const comparisons=[['room','Аудитория'],['date','Дата'],['start','Начало'],['end','Окончание'],['teacher','Преподаватель'],['subject','Предмет'],['subgroup','Подгруппа']];
     let body='';
-    if(before&&after) body=comparisons.filter(([key])=>String(before[key]??'')!==String(after[key]??'')).map(([key,label])=>`<p>${label}: <span class="diff-old">${esc(before[key]||'—')}</span> → <span class="diff-new">${esc(after[key]||'—')}</span></p>`).join('');
+    if(before&&after) body=feedChangedFields(event).map(field=>`<p>${esc(field.label)}: <span class="diff-old">${esc(feedValue(field.oldValue,field.style))}</span> → <span class="diff-new">${esc(feedValue(field.newValue,field.style))}</span></p>`).join('')||'<p>Изменились дополнительные сведения о занятии</p>';
     else body=`<p>${esc(event.kind==='baseline'?'История ведётся с этой проверки':event.kind==='removed'?'Запись исчезла из расписания':'Запись появилась в расписании')}</p>`;
     return `<div class="event" data-event="${attr(type)}" data-event-id="${attr(event.id)}">${link?`<button type="button" class="feed-link" data-history="${attr(event.lesson_id)}"><strong>${esc(title)}</strong><small>${esc(event.group_name)} · ${esc(item?.date?formatDate(item.date):'')} · ${esc(item?.subject||'Занятие')}</small></button>`:`<strong>${esc(title)}</strong>`}<time>${esc(stamp(event.detected_at))} · МСК</time>${body}</div>`;
   }
+  function historyPreferences(detail=state.detail) {
+    const id=String(detail?.lesson?.id||'');
+    return state.detailComparisons[id]??=( {version:'',journalOpen:false} );
+  }
+  function historyAction(event) {
+    if(event.kind==='added') return 'добавления пары';
+    if(event.kind==='removed') return 'удаления пары';
+    if(event.kind==='restored') return 'восстановления пары';
+    const names={room:'смены аудитории',time:'переноса пары',teacher:'смены преподавателя',subject:'смены предмета',subgroup:'смены подгруппы',replacement:'изменения замены'};
+    return event.types?.length===1?(names[event.types[0]]||'изменения пары'):'изменений пары';
+  }
+  function comparisonVersions(detail) {
+    const events=[...(detail.history||[])].sort((a,b)=>Number(b.id)-Number(a.id));
+    const versions=[];
+    for(const event of events) {
+      if(event.kind==='baseline') {
+        if(event.after) versions.push({key:'initial:'+event.id,event,snapshot:event.after,present:true,initial:true,
+          label:'При начале наблюдения · '+stamp(event.detected_at)});
+      } else {
+        // DTO.deleted describes a tombstone in removed.before, not existence
+        // before that event. Restored.before also contains a tombstone payload.
+        const present=!['added','restored'].includes(event.kind)&&Boolean(event.before);
+        versions.push({key:'before:'+event.id,event,snapshot:present?event.before:null,present,initial:false,
+          label:'До '+historyAction(event)+' · '+stamp(event.detected_at)});
+      }
+    }
+    return {events,versions};
+  }
+  function comparisonFields(before,current) {
+    const value=(version,key)=>{
+      if(!version.present) return '';
+      const item=version.snapshot||{};
+      if(key==='time') return [item.start,item.end].filter(Boolean).join('–');
+      if(key==='replacement') return Boolean(item.replacement);
+      return String(item[key]??'');
+    };
+    const fields=[];
+    if(before.present!==current.present) fields.push({key:'presence',label:'В расписании',before:before.present?'Есть пара':'Пары нет',now:current.present?'Есть пара':'Пары нет'});
+    for(const [key,label] of [['date','Дата'],['time','Время'],['subject','Предмет'],['type','Тип занятия'],['teacher','Преподаватель'],['room','Аудитория'],['subgroup','Подгруппа'],['replacement','Замена'],['topic','Тема'],['link','Ссылка']]) {
+      const old=value(before,key),now=value(current,key);
+      if(key==='replacement'&&(!before.present||!current.present)&&!old&&!now) continue;
+      if(old!==now) fields.push({key,label,before:old,now});
+    }
+    return fields;
+  }
+  function comparisonText(field,value,present) {
+    if(field==='presence') return value;
+    if(!present) return '—';
+    if(field==='replacement') return value?'Да':'Нет';
+    if(field==='type') return types[value]||value||'Занятие';
+    if(field==='date'&&/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value,{day:'numeric',month:'long',year:'numeric'});
+    return value||'Не указано';
+  }
+  function comparisonColumn(before,current,fields,side) {
+    const version=side==='before'?before:current;
+    const caption=side==='before'?(before.initial?'Наблюдение ':'До проверки ')+stamp(before.event.detected_at):'По проверке '+stamp(current.observedAt);
+    return `<section class="hc-version ${!version.present?'hc-absent':''}" data-side="${side}"><div class="hc-version-heading"><h3>${side==='before'?'Было':'Сейчас'}</h3><p>${esc(caption)} · МСК</p></div><dl class="hc-fields">${fields.map(field=>`<dt data-field="${field.key}">${field.label}</dt><dd data-field="${field.key}" class="hc-value ${field.key==='room'?'hc-room ':''}${side==='now'?'hc-changed':''}">${esc(comparisonText(field.key,side==='before'?field.before:field.now,version.present))}</dd>`).join('')}</dl></section>`;
+  }
   function historyView(detail) {
-    if(state.localDetail) return '<section class="history"><h2>История пары</h2><p class="settings-note">История для этой пары ещё не ведётся. Полный журнал доступен для занятий отслеживаемых групп.</p></section>';
-    return `<section class="history"><div class="heading"><h2>История пары</h2><small>${detail.history.length} событий</small></div><p class="meta">Время обнаружения ботом</p><div class="feed">${detail.history.map(event=>historyEvent(event)).join('')||'<p class="meta">Для этой пары ещё нет событий</p>'}</div></section>`;
+    if(state.localDetail) return '<section class="history hc-history"><h2>История пары</h2><p class="settings-note">История для этой пары ещё не ведётся. Полный журнал доступен для занятий отслеживаемых групп.</p></section>';
+    const {events,versions}=comparisonVersions(detail);
+    if(!events.length) return '<section class="history hc-history"><h2>История пары</h2><div class="empty hc-empty">История ещё не накоплена<p>Сохранённое расписание показано в подробностях занятия.</p></div></section>';
+    const preferences=historyPreferences(detail);
+    const requested=state.detailComparisonEvent?'before:'+state.detailComparisonEvent:'';
+    if(requested&&versions.some(version=>version.key===requested)) preferences.version=requested;
+    state.detailComparisonEvent='';
+    if(!versions.some(version=>version.key===preferences.version)) preferences.version=versions[0]?.key||'';
+    const before=versions.find(version=>version.key===preferences.version);
+    const current={snapshot:detail.lesson,present:!detail.lesson.deleted,observedAt:detail.lesson.observed_at||events[0].detected_at};
+    const fields=before?comparisonFields(before,current):[];
+    const selector=before&&versions.length>1?`<label class="hc-version-field"><span>Сравнить текущую версию с состоянием</span><select data-history-version aria-label="Предыдущая версия пары">${versions.map(version=>`<option value="${attr(version.key)}" ${version.key===before.key?'selected':''}>${esc(version.label)}</option>`).join('')}</select></label>`:'';
+    const comparison=fields.length?`<div class="hc-comparison" data-comparison-key="${attr(before.key)}" style="--hc-rows:${fields.length*2+1};--hc-field-rows:${fields.length*2}">${comparisonColumn(before,current,fields,'before')}${comparisonColumn(before,current,fields,'now')}</div><p class="hc-caption">Показаны только отличия · время проверок ботом</p>`:`<div class="empty hc-matching">Состояния совпадают<p>${events.every(event=>event.kind==='baseline')?'Изменений после начала наблюдения пока не обнаружено.':'В выбранной и текущей версиях отображаемые поля одинаковы. Все события сохранены в журнале ниже.'}</p></div>`;
+    return `<section class="history hc-history">${selector}${comparison}<details class="hc-journal" ${preferences.journalOpen?'open':''}><summary><span>Все события <small>${events.length}</small></span>${icon('down')}</summary><p class="meta">Когда бот обнаружил изменения · МСК</p><div class="feed">${events.map(event=>historyEvent(event)).join('')}</div></details></section>`;
   }
   function avatar(person) {
     let url='';
@@ -237,7 +361,9 @@
   function detailsView() {
     const detail=state.detail,item=detail.lesson;
     const teacher=state.localDetail && state.teacher?.teacher ? state.teacher.teacher : {name:item.teacher};
-    return `${btn('back',state.localDetail?'teacher':state.returnPage,`${icon('chevron','icon-previous')}Назад`,'back')}<div class="context"><h1>${esc(item.group_name)} · ${esc(formatDate(item.date))}</h1><p>${esc(item.deleted?'Удалённая пара':'Подробности занятия')}</p></div><div class="detail">${lessonCard(item,true)}</div><div class="detail-actions">${btn('detail-tab','details','Преподаватель',state.detailTab==='details'?'action primary':'action')}${btn('detail-tab','history','История',state.detailTab==='history'?'action primary':'action')}</div>${state.detailTab==='history'?historyView(detail):`${btn(state.localDetail?'back':'teacher-open',state.localDetail?'teacher':item.id,`${avatar(teacher)}<span class="person-text"><strong>${esc(item.teacher||'Преподаватель не указан')}</strong><small>Открыть расписание преподавателя</small></span><span class="person-arrow">${icon('chevron')}</span>`,'person')}<p class="settings-note">Двойное нажатие на пару сразу открывает её историю</p>`}`;
+    const history=state.detailTab==='history';
+    const context=history?`<div class="context hc-context"><p>${esc(item.group_name)} · ${esc(formatDate(item.date))} · ${esc(item.start)}–${esc(item.end)}</p><h1>${esc(item.subject)}</h1><p>${esc(types[item.type]||'Занятие')}${item.subgroup?' · п/г '+esc(item.subgroup):''}${item.deleted?' · удалена':''}</p></div>`:`<div class="context"><h1>${esc(item.group_name)} · ${esc(formatDate(item.date))}</h1><p>${esc(item.deleted?'Удалённая пара':'Подробности занятия')}</p></div><div class="detail">${lessonCard(item,true)}</div>`;
+    return `${btn('back',state.localDetail?'teacher':state.returnPage,`${icon('chevron','icon-previous')}Назад`,'back')}${context}<div class="detail-actions ${history?'hc-detail-tabs':''}">${btn('detail-tab','details','Преподаватель',state.detailTab==='details'?'action primary':'action')}${btn('detail-tab','history','История',state.detailTab==='history'?'action primary':'action')}</div>${history?historyView(detail):`${btn(state.localDetail?'back':'teacher-open',state.localDetail?'teacher':item.id,`${avatar(teacher)}<span class="person-text"><strong>${esc(item.teacher||'Преподаватель не указан')}</strong><small>Открыть расписание преподавателя</small></span><span class="person-arrow">${icon('chevron')}</span>`,'person')}<p class="settings-note">Двойное нажатие на пару сразу открывает её историю</p>`}`;
   }
   function settingsView() {
     const user=profile(),fields=state.bootstrap,disabled=state.busy?'disabled':'';
@@ -266,7 +392,7 @@
     return form&&element.matches('input[name="name"]')?`[data-group-form="${form.dataset.groupForm}"] input[name="name"]`:null;
   }
   function visibleLesson(item) {
-    return ['id','group_id','group_name','date','start','end','subject','type','teacher','room','subgroup','deleted','military','status','history_count','history_available'].map(key=>item[key]??null);
+    return ['id','group_id','group_name','date','start','end','subject','type','teacher','room','subgroup','replacement','topic','link','deleted','military','status','history_count','history_available'].map(key=>item[key]??null);
   }
   function scheduleContext() {
     const period=state.mode==='day'?state.date:state.mode==='month'?firstMonth(state.date):monday(state.date);
@@ -298,13 +424,17 @@
     if(scheduleShell?.context) scrollPositions.set(scheduleShell.context,panePosition(scheduleShell.scroll,'[data-lesson]'));
     scheduleShell=null;
   }
+  function releaseFeedShell() {
+    if(feedShell) feedPosition=panePosition(feedShell.scroll,'[data-event-id]');
+    feedShell=null;
+  }
   function setText(element,text) {if(element.textContent!==String(text)) element.textContent=String(text);}
   function compactScheduleChrome(teacher) {
     return `<div class="schedule-chrome">${teacher?`<div class="schedule-back-row">${btn('back','detail',`${icon('chevron','icon-previous')}К паре`,'schedule-back')}</div>`:''}<div class="schedule-toolbar"><div class="schedule-group-control"></div><div class="schedule-period-row"><button type="button" class="period-arrow" data-shift="-1" aria-label="Предыдущий период">${icon('chevron','icon-previous')}</button><details class="date-picker"><summary aria-label="Выбрать дату"><span class="period-title"></span>${icon('down')}</summary><label class="date-picker-popup">Перейти к дате<input type="date" aria-label="Дата расписания" data-date></label></details><button type="button" class="period-arrow" data-shift="1" aria-label="Следующий период">${icon('chevron')}</button></div><select aria-label="Период расписания" data-mode><option value="day">День</option><option value="week">Неделя</option><option value="month">Месяц</option></select></div>${dateStrip()}<div class="freshness"><span class="freshness-text"></span><span class="freshness-actions">${btn('today','1','Сегодня','freshness-today')}${teacher?'':`<button type="button" data-refresh="1" class="refresh-button" aria-label="Обновить расписание" title="Обновить">${icon('refresh')}</button>`}</span></div></div>`;
   }
   function ensureScheduleShell() {
     if(scheduleShell?.page===state.page && view.contains(scheduleShell.chrome)) return scheduleShell;
-    releaseScheduleShell();feedShell=null;
+    releaseScheduleShell();releaseFeedShell();
     view.innerHTML=compactScheduleChrome(state.page==='teacher')+`<div class="schedule-scroll">${scheduleViewport('')}</div>`;
     view.scrollTop=0;
     scheduleShell={page:state.page,chrome:view.querySelector('.schedule-chrome'),scroll:view.querySelector('.schedule-scroll'),
@@ -388,18 +518,39 @@
     return [event.id,event.lesson_id,event.kind,event.detected_at,event.group_id,event.group_name,event.types,
       event.before?visibleLesson(event.before):null,event.after?visibleLesson(event.after):null];
   }
+  function feedEventCount(count) {
+    const last=count%10,teen=count%100;
+    return `${count} ${teen>=11&&teen<=14?'изменений':last===1?'изменение':last>=2&&last<=4?'изменения':'изменений'}`;
+  }
+  function feedDayTitle(day) {
+    if(!day) return 'Дата обнаружения неизвестна';
+    const today=state.bootstrap?.today;
+    const options={day:'numeric',month:'long',...(day.slice(0,4)!==today?.slice(0,4)?{year:'numeric'}:{})};
+    return (day===today?'Сегодня, ':today&&day===shiftDay(today,-1)?'Вчера, ':'')+formatDate(day,options);
+  }
+  function changeFeedBody(events) {
+    if(!events.length) return '<div class="empty">Изменений пока нет<p>Журнал заполняется при проверках расписания</p></div>';
+    const sections=[];
+    for(const event of events) {
+      const day=feedMoment(event.detected_at).day;
+      if(!sections.length||sections.at(-1).day!==day) sections.push({day,events:[]});
+      sections.at(-1).events.push(event);
+    }
+    return sections.map(section=>`<section class="ce-day" data-detected-day="${attr(section.day)}"><h2>${esc(feedDayTitle(section.day))}</h2><div class="ce-events">${section.events.map(event=>historyEvent(event,true)).join('')}</div></section>`).join('');
+  }
   function renderChanges() {
     if(!feedShell || !view.contains(feedShell.chrome)) {
       releaseScheduleShell();view.innerHTML=`<div class="changes-chrome">${header('Изменения')}<p class="meta changes-count"></p></div><div class="changes-scroll"><div class="feed-content"></div></div>`;
-      view.scrollTop=0;feedShell={chrome:view.querySelector('.changes-chrome'),scroll:view.querySelector('.changes-scroll'),content:view.querySelector('.feed-content'),key:null};
+      view.scrollTop=0;feedShell={chrome:view.querySelector('.changes-chrome'),scroll:view.querySelector('.changes-scroll'),content:view.querySelector('.feed-content'),key:null,restore:feedPosition};
     }
-    setText(feedShell.chrome.querySelector('.changes-count'),`Хронология${state.totalEvents!==null?' · '+state.totalEvents+' изменений':''} · время обнаружения ботом`);
+    setText(feedShell.chrome.querySelector('.changes-count'),`${state.totalEvents!==null?feedEventCount(state.totalEvents)+' · ':''}Время обнаружения ботом · МСК`);
+    feedShell.content.querySelectorAll('[data-detected-day]').forEach(section=>setText(section.querySelector('h2'),feedDayTitle(section.dataset.detectedDay)));
     const key=JSON.stringify([state.events.map(eventRevision),state.nextCursor,state.nextOffset,state.error?.message]);
     if(key===feedShell.key) return;
-    const saved=panePosition(feedShell.scroll,'[data-event-id]');
+    const saved=feedShell.restore||panePosition(feedShell.scroll,'[data-event-id]');
     const more=state.nextCursor!==null||state.nextOffset!==null;
-    feedShell.content.innerHTML=state.error?`<div class="notice" role="alert"><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`:`<div class="feed">${state.events.length?state.events.map(event=>historyEvent(event,true)).join(''):'<div class="empty">Изменений пока нет<p>Журнал заполняется при проверках расписания</p></div>'}</div>`+(more?btn('more-events',state.nextOffset??0,'Показать ещё','action block-button'):'');
-    restorePanePosition(feedShell.scroll,saved,'[data-event-id]');feedShell.key=key;
+    feedShell.content.innerHTML=state.error?`<div class="notice" role="alert"><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`:`<div class="feed change-feed">${changeFeedBody(state.events)}</div>`+(more?btn('more-events',state.nextOffset??0,'Показать ещё','action block-button'):'');
+    restorePanePosition(feedShell.scroll,saved,'[data-event-id]');feedShell.restore=null;feedShell.key=key;
   }
   function render(options={}) {
     if(!['schedule','teacher'].includes(state.page)) stopScheduleMotion();
@@ -412,10 +563,14 @@
     });
     try {if(['detail','teacher'].includes(state.page)) telegram?.BackButton?.show();else telegram?.BackButton?.hide();} catch(_) {}
     const fixed=Boolean(state.bootstrap&&['schedule','teacher','changes'].includes(state.page));
+    // Capture the inner scroll before changing main from a flex pane to a
+    // document: that layout change otherwise clamps the old pane to zero.
+    if(scheduleShell&&!['schedule','teacher'].includes(state.page)) releaseScheduleShell();
+    if(feedShell&&state.page!=='changes') releaseFeedShell();
     app.classList.toggle('is-fixed-view',fixed);
     if(fixed&&state.page!=='changes') {renderSchedule(options);return;}
     if(fixed&&state.page==='changes') {renderChanges();return;}
-    releaseScheduleShell();feedShell=null;
+    releaseScheduleShell();releaseFeedShell();
     if(state.error) {
       view.innerHTML=header('Расписание')+`<div class="notice" role="alert"><h2>Не удалось загрузить</h2><p>${esc(state.error.message)}</p>${btn('retry','1','Попробовать ещё раз')}</div>`;return;
     }
@@ -433,7 +588,7 @@
   function applyBootstrap(response) {
     const roster=JSON.stringify(response.groups.map(group=>[group.id,group.name,group.primary,group.enabled]));
     if(rosterVersion && rosterVersion!==roster) {
-      clearScheduleCache();state.events=[];state.nextOffset=null;state.nextCursor=null;state.totalEvents=null;state.feedRevision=null;state.feedLoadedOlder=false;
+      clearScheduleCache();state.events=[];state.nextOffset=null;state.nextCursor=null;state.totalEvents=null;state.feedRevision=null;state.feedLoadedOlder=false;feedPosition=null;
     }
     rosterVersion=roster;
     state.bootstrap=response;
@@ -484,17 +639,18 @@
         const result=await api('/api/changes?'+new URLSearchParams(query));
         if(version!==requestVersion) return;
         const hadOlder=state.feedLoadedOlder;
+        const keepExisting=Boolean(options.keep||state.events.length);
         const previousIds=new Set(state.events.map(event=>String(event.id)));
-        const gap=options.keep&&!options.append&&hadOlder&&result.events.length>0&&
+        const gap=keepExisting&&!options.append&&hadOlder&&result.events.length>0&&
           (result.next_cursor!=null||result.next_offset!=null)&&!result.events.some(event=>previousIds.has(String(event.id)));
         // Event IDs keep older pages stable when new changes arrive at the top.
-        const merged=new Map((options.append||options.keep?state.events:[]).map(event=>[String(event.id),event]));
+        const merged=new Map((options.append||keepExisting?state.events:[]).map(event=>[String(event.id),event]));
         for(const event of result.events) merged.set(String(event.id),event);
         state.events=[...merged.values()].sort((a,b)=>Number(b.id)-Number(a.id));
-        if(!options.keep || options.append || !hadOlder || gap) {
+        if(!keepExisting || options.append || !hadOlder || gap) {
           state.nextOffset=result.next_offset??null;state.nextCursor=result.next_cursor??null;
         }
-        state.feedLoadedOlder=options.append||Boolean(options.keep&&hadOlder);
+        state.feedLoadedOlder=options.append||Boolean(keepExisting&&hadOlder);
         state.totalEvents=result.total_events??null;state.feedRevision=result.revision??null;
       } else if(page==='settings') {
         await bootstrap();
@@ -525,9 +681,10 @@
     } catch(error) {notify(error.message,7000);return false;}
     finally {setBusy(false);}
   }
-  async function openLesson(id,history=false) {
+  async function openLesson(id,history=false,historyEventId='') {
     clearTimeout(tapTimer);tapTimer=null;lastTap=null;
     state.lessonId=id;
+    state.detailComparisonEvent=String(historyEventId||'');
     const teacherItem=state.page==='teacher'?state.teacher?.lessons.find(item=>item.id===id):null;
     if(teacherItem?.history_available===false) {
       state.sourceDetail=state.detail;state.detail={lesson:teacherItem,history:[]};
@@ -691,7 +848,7 @@
     const target=event.target.closest('button');
     if(!target || target.disabled) return;
     if(target.dataset.lesson) {activateLesson(target.dataset.lesson,event);return;}
-    if(target.dataset.history) {openLesson(target.dataset.history,true);return;}
+    if(target.dataset.history) {openLesson(target.dataset.history,true,target.dataset.historyEvent||null);return;}
     clearTimeout(tapTimer);tapTimer=null;lastTap=null;
     if(target.dataset.settingsTab) {
       state.settingsTab=target.dataset.settingsTab;render();
@@ -740,6 +897,7 @@
   app.addEventListener('toggle',event=>{
     const key=event.target.dataset.settingsSection;
     if(key&&view.contains(event.target)) state.settingsOpen[key]=event.target.open;
+    if(event.target.matches?.('.hc-journal')&&view.contains(event.target)&&state.detail) historyPreferences().journalOpen=event.target.open;
   },true);
   app.addEventListener('input',event=>{
     const form=event.target.closest('[data-group-form]');
@@ -752,6 +910,14 @@
     else if(target.hasAttribute('data-date')) {
       const value=target.value.length===7?target.value+'-01':target.value;
       if(/^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(parseDate(value).valueOf())) {state.date=safeDay(value);target.closest('details')?.removeAttribute('open');await loadPage({navigation:true});}
+    } else if(target.hasAttribute('data-history-version')&&state.detail) {
+      const preferences=historyPreferences();
+      if(!comparisonVersions(state.detail).versions.some(version=>version.key===target.value)) return;
+      preferences.version=target.value;
+      preferences.journalOpen=Boolean(view.querySelector('.hc-journal')?.open);
+      const scrollTop=view.scrollTop;
+      render();view.scrollTop=scrollTop;
+      view.querySelector('[data-history-version]')?.focus({preventScroll:true});
     } else if(target.dataset.save) {
       if(target.type==='radio'&&!target.checked) return;
       state.settingsFocus=settingsFocusKey(target);

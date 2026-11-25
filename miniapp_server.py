@@ -175,7 +175,9 @@ def lesson_dto(record):
             "end": raw.get("датаОкончания", "")[11:16], "subject": subject,
             "type": {"Лекция": "lec", "Практика": "prac", "Лабораторная": "lab"}.get(kind, "other"),
             "teacher": str(raw.get("преподаватель") or ""), "room": str(raw.get("аудитория") or ""),
-            "subgroup": raw.get("номерПодгруппы") or "", "deleted": bool(record.get("deleted")),
+            "subgroup": raw.get("номерПодгруппы") or "", "replacement": bool(raw.get("замена")),
+            "topic": str(raw.get("тема") or ""), "link": str(raw.get("ссылка") or ""),
+            "deleted": bool(record.get("deleted")),
             "military": notification_subject(raw)[0] == "военная кафедра", "status": status,
             "history_count": record.get("history_count", 0), "observed_at": record.get("observed_at")}
 
